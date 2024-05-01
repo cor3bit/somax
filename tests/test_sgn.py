@@ -6,9 +6,9 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from egn import load_data
-from egn import model_zoo as zoo
-from egn.sgn import SGN
+from benchmarks.utils.data_loader import load_data
+from benchmarks.utils import model_zoo as zoo
+from somax import SGN
 
 
 def flatten_2d_jacobian(jac_tree):
@@ -153,10 +153,8 @@ def test_sgn_mse():
 
     realized_losses = jnp.array(test_set_loss)
 
-    print(realized_losses)
-
     actual_losses = jnp.array(np.array(
-        [3.1070921, 0.9878007, 0.45470974, 0.4062884, 0.37728566, 0.31710404, ]))
+        [3.1070921, 0.96741265, 0.49240723, 0.39509234, 0.37976882, 0.34163678, ]))
 
     assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"
 
@@ -263,6 +261,6 @@ def test_sgn_ce():
     realized_losses = jnp.array(test_set_loss)
 
     actual_losses = jnp.array(np.array(
-        [1.1646405, 1.1158457, 1.09132, 0.9722517, 0.8618564, 0.7586593, ]))
+        [1.1646405, 1.1309346, 1.0883108, 1.021174, 0.7846394, 0.62611365]))
 
     assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"

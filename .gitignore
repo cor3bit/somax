@@ -1,3 +1,7 @@
+# Custom folders
+artifacts/
+scratch/
+
 # VSCode
 .vscode/
 

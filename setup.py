@@ -7,10 +7,10 @@ def read(fname):
 
 
 setuptools.setup(
-    name='egn',
+    name='somax',
     version='0.0.1.dev',
     author='Nick Korbit',
-    description='Exact Gauss-Newton Optimization for Machine Learning',
+    description='SOMAX: Second-Order Methods for Machine Learning in JAX',
     long_description=read('README.md'),
     classifiers=[
         'Programming Language :: Python :: 3.8',
@@ -30,7 +30,6 @@ setuptools.setup(
     platforms='any',
     # python_requires='>=3.10',
     # install_requires=[
-    #     'gym==0.23.1',
     #     'jax',
     # ],
 )

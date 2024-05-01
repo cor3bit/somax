@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from egn import EGN
+from somax import EGN
 
 if __name__ == '__main__':
     jax.config.update('jax_platform_name', 'cpu')

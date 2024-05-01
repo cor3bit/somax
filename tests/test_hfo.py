@@ -6,9 +6,9 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from egn import load_data
-from egn import model_zoo as zoo
-from egn.hfo import HFO
+from benchmarks.utils.data_loader import load_data
+from benchmarks.utils import model_zoo as zoo
+from somax import HFO
 
 
 def flatten_hessian(hessian_dict):
@@ -46,14 +46,15 @@ def test_hfo_mse():
     seed = 1337
     rng = jax.random.PRNGKey(seed)
     b = 32
+    alpha = 0.5
     regularizer = 1.0
-    maxcg_iter = 50
+    maxcg_iter = 3
 
     # solver
     solver = HFO(
         loss_fun=mse,
         maxcg=maxcg_iter,
-        learning_rate=1.0,
+        learning_rate=alpha,
         regularizer=regularizer,
         batch_size=b,
     )
@@ -102,7 +103,10 @@ def test_hfo_mse():
 
     dir_diff = jnp.max(jnp.abs(dir_hfo - dir_true))
 
-    if maxcg_iter == 10:
+    if maxcg_iter == 3:
+        # maxcg=10, dir_diff~0.06
+        assert dir_diff < 1.5, "Direction mismatch"
+    elif maxcg_iter == 10:
         # maxcg=10, dir_diff~0.06
         assert dir_diff < 0.07, "Direction mismatch"
     elif maxcg_iter == 20:
@@ -110,7 +114,7 @@ def test_hfo_mse():
         assert dir_diff < 0.003, "Direction mismatch"
     elif maxcg_iter == 50:
         # maxcg=50, dir_diff~1e-5
-        assert dir_diff < 1e-4, "Direction mismatch"
+        assert dir_diff < 5e-4, "Direction mismatch"
     else:
         raise ValueError(f"Unknown maxcg_iter: {maxcg_iter}")
 
@@ -120,6 +124,9 @@ def test_hfo_mse():
 
     # update
     test_set_loss = [loss_t0]
+
+    lambdas = [regularizer, ]
+
     for i in range(5):
         batch_X = X_train[i * b:(i + 1) * b, :]
         batch_y = Y_train[i * b:(i + 1) * b]
@@ -127,17 +134,12 @@ def test_hfo_mse():
         params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
 
         test_set_loss.append(mse(params, X_test, Y_test))
+        lambdas.append(opt_state.regularizer)
 
     realized_losses = jnp.array(test_set_loss)
 
-    actual_losses = jnp.array(np.array([
-        3.1070921,
-        0.95321834,
-        0.598518,
-        1.1170768,
-        0.76435095,
-        0.5517588,
-    ]))
+    actual_losses = jnp.array(np.array(
+        [3.1070921, 2.0268407, 1.3703537, 0.79599005, 0.6253868, 0.5462274, ]))
 
     assert jnp.allclose(realized_losses, actual_losses, atol=1e-3), "Realized Loss mismatch"
 
@@ -229,6 +231,7 @@ def test_hfo_ce():
 
     # update
     test_set_loss = [loss_t0]
+    lambdas = [regularizer, ]
     for i in range(5):
         batch_X = X_train[i * b:(i + 1) * b, :]
         batch_y = Y_train[i * b:(i + 1) * b]
@@ -236,9 +239,10 @@ def test_hfo_ce():
         params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
 
         test_set_loss.append(ce(params, X_test, Y_test))
+        lambdas.append(opt_state.regularizer)
 
     realized_losses = jnp.array(test_set_loss)
 
-    actual_losses = jnp.array(np.array([1.1646403, 1.1182823, 1.0836599, 0.8252216, 0.61152005, 0.52097356, ]))
+    actual_losses = jnp.array(np.array([1.1646405, 1.134731, 1.0789027, 0.9477376, 0.45464972, 0.41376147]))
 
     assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"

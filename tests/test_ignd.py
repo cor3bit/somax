@@ -6,9 +6,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from egn.ignd import IGND
-from egn import load_data
-from egn import model_zoo as zoo
+from benchmarks.utils.data_loader import load_data
+from benchmarks.utils import model_zoo as zoo
+from somax import IGND
 
 
 def test_ignd_mse():

@@ -1,9 +1,8 @@
 """
 Hessian-Free Optimization (HFO):
 - approximate solution to the linear system via the CG method
-- adaptive learning rate (line search)
 - adaptive regularization (lambda)
-- momentum acceleration
+- line search
 """
 
 from typing import Any
@@ -101,29 +100,33 @@ def armijo_line_search(loss_fun, unroll, jit,
 class HFOState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
-    # error: float
-    # value: float
     stepsize: float
     regularizer: float
-    # direction_inf_norm: float
-    velocity: Optional[Any]
+    cg_guess: Optional[Any]
 
 
 @dataclasses.dataclass(eq=False)
 class HFO(base.StochasticSolver):
     # Jacobian of the residual function
     loss_fun: Callable
-    maxcg: int = 10
+    maxcg: int = 3
 
     # Either fixed alpha if line_search=False or max_alpha if line_search=True
-    learning_rate: Optional[float] = None
+    learning_rate: float = 1.0
+    decay_coef = 0.1
 
     batch_size: Optional[int] = None
 
     n_classes: Optional[int] = None
 
+    # Adaptive Regularization parameters
+    adaptive_lambda: bool = True
+    regularizer: float = 1.0
+    lambda_decrease_factor: float = 0.99  # default value recommended by Kiros
+    lambda_increase_factor: float = 1.01  # default value recommended by Kiros
+
     # Line Search parameters
-    line_search: bool = False
+    line_search: bool = True
 
     aggressiveness: float = 0.9  # default value recommended by Vaswani et al.
     decrease_factor: float = 0.8  # default value recommended by Vaswani et al.
@@ -132,16 +135,6 @@ class HFO(base.StochasticSolver):
 
     max_stepsize: float = 1.0
     maxls: int = 15
-
-    # Adaptive Regularization parameters
-    adaptive_lambda: bool = False
-    regularizer: float = 1.0
-    # regularizer_eps: float = 1e-5
-    lambda_decrease_factor: float = 0.99  # default value recommended by Kiros
-    lambda_increase_factor: float = 1.01  # default value recommended by Kiros
-
-    # Momentum parameters
-    momentum: float = 0.0
 
     pre_update: Optional[Callable] = None
 
@@ -155,29 +148,6 @@ class HFO(base.StochasticSolver):
 
         self.reference_signature = self.loss_fun
         self.grad_fun = jax.grad(self.loss_fun)
-
-        # self.hvp_fun = jax.jit(jax.hessian_vector_product(self.mse))
-
-        # Regression (MSE)
-        # if self.loss_type == 'mse':
-        #     # TODO
-        #     self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_fun), in_axes=self.jac_axis)
-        #     self.calculate_direction = self.calculate_direction_mse
-        #     self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
-        # # Classification (Cross-Entropy)
-        # elif self.loss_type == 'ce' or self.loss_type == 'xe':
-        #     self.loss_fun = self.ce
-        #     self.calculate_direction = self.calculate_direction_ce
-        #     if self.n_classes == 2:
-        #         # TODO check n_classes == 2 does not interfere with the internal functions
-        #         self.jac_fun = jax.vmap(jax.grad(self.predict_with_aux, has_aux=True), in_axes=(None, 0))
-        #     else:
-        #         self.jac_fun = jax.vmap(jax.jacrev(self.predict_with_aux, has_aux=True), in_axes=(None, 0))
-        #
-        #     self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.n_classes * self.batch_size)
-        #     self.block_diag_template = jnp.eye(self.batch_size).reshape(self.batch_size, 1, self.batch_size, 1)
-        # else:
-        #     raise ValueError(f"Loss type \'{self.loss_type}\' not supported.")
 
         # set up line search
         if self.line_search:
@@ -220,114 +190,84 @@ class HFO(base.StochasticSolver):
           (params, state)
         """
 
-        # convert pytree to JAX array (w)
-        # params_flat, unflatten_fn = ravel_pytree(params)
-
         # ---------- STEP 1: calculate direction with DG ---------- #
         targets = kwargs['targets']
         direction_tree, grad_loss_tree = self.calculate_direction(params, state, targets, *args)
 
-        # TODO restore LS, AT, momentum
-        # # ---------- STEP 2: line search for alpha ---------- #
-        # f_cur = None
-        # f_next = None
-        # next_params = None
-        # if self.line_search:
-        #     stepsize = self.reset_stepsize(state.stepsize)
-        #
-        #     goldstein = self.reset_option == 'goldstein'
-        #
-        #     f_cur = self.loss_fun(params, *args, targets)
-        #
-        #     # the directional derivative used for Armijo's line search
-        #     grad_loss = ravel_pytree(grad_loss_tree)[0]
-        #     direct_deriv = grad_loss.T @ direction
-        #
-        #     direction_packed = unflatten_fn(direction)
-        #
-        #     stepsize, next_params, f_next = self._armijo_line_search(
-        #         goldstein, self.maxls, params, f_cur, stepsize, direction_packed, direct_deriv, self._coef,
-        #         self.decrease_factor, self.increase_factor, self.max_stepsize, args, targets, )
-        # else:
-        #     stepsize = state.stepsize
-        #
-        # # ---------- STEP 3: momentum acceleration ---------- #
-        # if self.momentum == 0:
-        #     next_velocity = None
-        # else:
-        #     # next_params = params + stepsize*direction + momentum*(params - previous_params)
-        #
-        #     if next_params is None:
-        #         next_params_flat = params_flat + stepsize * direction
-        #     else:
-        #         next_params_flat, _ = ravel_pytree(next_params)
-        #
-        #     next_params_flat = next_params_flat + self.momentum * state.velocity
-        #     next_velocity = next_params_flat - params_flat
-        #
-        #     next_params = unflatten_fn(next_params_flat)
-        #
-        # # ! params should be "packed" in a pytree before sending to the OptStep
-        # if next_params is None:
-        #     # the only case is when LS=False, Momentum=0
-        #     next_params_flat = params_flat + stepsize * direction
-        #     next_params = unflatten_fn(next_params_flat)
-        #
-        # # ---------- STEP 4: update (next step) lambda ---------- #
-        # if self.adaptive_lambda:
-        #     # f_cur can be already computed if line search is used
-        #     f_cur = self.loss_fun(params, *args, targets) if f_cur is None else f_cur
-        #
-        #     # if momentum is used, we need to calculate f_next again to take into account the momentum term
-        #     f_next = self.loss_fun(next_params, *args, targets) if f_next is None or self.momentum > 0 else f_next
-        #
-        #     # in a good scenario, should be large and negative
-        #     num = f_next - f_cur
-        #
-        #     if self.momentum > 0:
-        #         delta_w = next_velocity
-        #     else:
-        #         delta_w = stepsize * direction
-        #
-        #     b = targets.shape[0]
-        #
-        #     # dimensions: (b x d) @ (d x 1) = (b x 1)
-        #     J = None
-        #     Q = None
-        #     # TODO mvp through jvp
-        #
-        #     mvp = J @ delta_w
-        #     if Q is None:
-        #         denom = grad_loss.T @ delta_w + 0.5 * mvp.T @ mvp / b
-        #     else:
-        #         denom = grad_loss.T @ delta_w + 0.5 * mvp.T @ Q @ mvp / b
-        #
-        #     # negative denominator means that the direction is a descent direction
-        #
-        #     rho = num / denom
-        #
-        #     regularizer_next = lax.cond(
-        #         rho < 0.25,
-        #         lambda _: self.lambda_increase_factor * state.regularizer,
-        #         lambda _: lax.cond(
-        #             rho > 0.75,
-        #             lambda _: self.lambda_decrease_factor * state.regularizer,
-        #             lambda _: state.regularizer,
-        #             None,
-        #         ),
-        #         None,
-        #     )
-        # else:
-        #     regularizer_next = state.regularizer
+        # ---------- STEP 2: line search for alpha ---------- #
+        f_cur = None
+        f_next = None
+        direct_deriv = None
+        if not self.line_search:
+            # constant learning rate
+            stepsize = state.stepsize
+            next_params = tree_add_scalar_mul(params, state.stepsize, direction_tree)
+        else:
+            stepsize = self.reset_stepsize(state.stepsize)
 
-        next_params = tree_add_scalar_mul(params, state.stepsize, direction_tree)
+            goldstein = self.reset_option == 'goldstein'
+
+            f_cur = self.loss_fun(params, *args, targets)
+
+            # the directional derivative used for Armijo's line search
+            direction, _ = ravel_pytree(direction_tree)
+            grad_loss, _ = ravel_pytree(grad_loss_tree)
+            direct_deriv = grad_loss.T @ direction
+
+            stepsize, next_params, f_next = self._armijo_line_search(
+                goldstein, self.maxls, params, f_cur, stepsize,
+                direction_tree, direct_deriv, self._coef,
+                self.decrease_factor, self.increase_factor,
+                self.max_stepsize, args, targets,
+            )
+
+        # ---------- STEP 3: update (next step) lambda ---------- #
+        if not self.adaptive_lambda:
+            # constant regularization
+            regularizer_next = state.regularizer
+        else:
+            # numerator: in a good scenario, should be large and negative
+            if f_cur is None:
+                f_cur = self.loss_fun(params, *args, targets)
+            if f_next is None:
+                f_next = self.loss_fun(next_params, *args, targets)
+
+            num = f_next - f_cur
+
+            # denominator
+            Hv_tree = self.hvp(params, direction_tree, targets, *args)
+
+            # flattening stage
+            Hv, _ = ravel_pytree(Hv_tree)
+
+            if direct_deriv is None:
+                direction, _ = ravel_pytree(direction_tree)
+                grad_loss, _ = ravel_pytree(grad_loss_tree)
+                direct_deriv = grad_loss.T @ direction
+
+            denom = 0.5 * jnp.vdot(direction, Hv) + direct_deriv
+
+            # negative denominator means that the direction is a descent direction
+            rho = num / denom
+
+            regularizer_next = lax.cond(
+                rho < 0.25,
+                lambda _: self.lambda_increase_factor * state.regularizer,
+                lambda _: lax.cond(
+                    rho > 0.75,
+                    lambda _: self.lambda_decrease_factor * state.regularizer,
+                    lambda _: state.regularizer,
+                    None,
+                ),
+                None,
+            )
 
         # construct the next state
         next_state = HFOState(
             iter_num=state.iter_num + 1,  # Next Iteration
-            stepsize=state.stepsize,  # Current alpha
-            regularizer=state.regularizer,  # Next lambda
-            velocity=None,  # Next velocity
+            stepsize=stepsize,  # Current alpha
+            regularizer=regularizer_next,  # Next lambda
+            cg_guess=tree_scalar_mul(self.decay_coef, direction_tree),  # Next CG guess
         )
 
         return base.OptStep(params=next_params, state=next_state)
@@ -336,16 +276,11 @@ class HFO(base.StochasticSolver):
                    init_params: Any,
                    *args,
                    **kwargs) -> HFOState:
-        if self.momentum == 0:
-            velocity = None
-        else:
-            velocity = jnp.zeros_like(ravel_pytree(init_params)[0])
-
         return HFOState(
             iter_num=0,
             stepsize=self.learning_rate,
             regularizer=self.regularizer,
-            velocity=velocity,
+            cg_guess=None,
         )
 
     def optimality_fun(self, params, *args, **kwargs):
@@ -372,7 +307,6 @@ class HFO(base.StochasticSolver):
     def calculate_direction(self, params, state, targets, *args):
         def mvp(vec):
             # Hv
-            # hv = jax.jvp(jax.grad(stand_alone_loss_fn), (params,), (vec,))[1]
             hv = self.hvp(params, vec, targets, *args)
             # add regularization, works since (H + lambda*I) v = Hv + lambda*v
             return tree_add_scalar_mul(hv, state.regularizer, vec)
@@ -382,14 +316,12 @@ class HFO(base.StochasticSolver):
         grad_tree = self.grad_fun(params, *args, targets)
 
         # CG iterations
-        # TODO initial guess and preconditioner
-        # TODO verify n_iter
         direction, _ = cg(
             A=mvp,
             b=tree_scalar_mul(-1, grad_tree),
             maxiter=self.maxcg,
-            # x0=None,  # initial guess
-            # M=None,  # preconditioner
+            x0=state.cg_guess,  # initial guess
+            # M=None,  # preconditioner (see wiesler2013: preconditioner is not important)
         )
 
         return direction, grad_tree
