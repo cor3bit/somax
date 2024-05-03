@@ -15,16 +15,16 @@ from jaxopt import OptaxSolver
 
 from benchmarks.utils.data_loader import load_data
 from benchmarks.utils import model_zoo as zoo
-from somax import EGN, HFO, SGN
+from somax import EGN, HFO, SGN, IGND
 
-TASK = 'california_housing'  # california_housing, diamonds, superconduct
+TASK = 'diamonds'  # california_housing, diamonds, superconduct
 
 GPU = True
 JIT = True
 
 # STEPS = 100_000
 STEPS = 5_000
-EVAL_EVERY = 50
+EVAL_EVERY = 25
 
 N_SEEDS = 1
 
@@ -39,11 +39,17 @@ SOLVER_HPS = {
         #     'lr': [0.05, ],
         # },
 
-        # 'adam': {
-        #     'b': [64, ],
-        #     'lr': [0.0005, 0.001, ],
-        # },
-        #
+        'adam': {
+            'b': [64, ],
+            'lr': [0.005, ],
+        },
+
+        'ignd': {
+            'b': [64, ],
+            'lr': [1.0, ],
+            'm': [(0.9, 0.0), ],
+        },
+
         # 'egn': {
         #     'b': [64, ],
         #     'lr': [0.1, ],
@@ -55,12 +61,12 @@ SOLVER_HPS = {
         #     'm': [0.0, ],
         # },
 
-        'hfo': {
-            'b': [64, ],
-            'maxcg': [20, ],
-            'lr': [0.05, ],
-            'reg': [1.0, ],
-        },
+        # 'hfo': {
+        #     'b': [64, ],
+        #     'maxcg': [20, ],
+        #     'lr': [0.05, ],
+        #     'reg': [1.0, ],
+        # },
 
         # 'sgn': {
         #     'b': [64, ],
@@ -71,26 +77,32 @@ SOLVER_HPS = {
     },
 
     'superconduct': {
-        # 'sgd': {
+        'sgd': {
+            'b': [64, ],
+            'lr': [3e-4, 1e-4, ],
+        },
+
+        # 'adam': {
         #     'b': [64, ],
-        #     'lr': [0.0003, ],
+        #     'lr': [0.005, ],  # 0.005,
         # },
-
-        'adam': {
-            'b': [256, ],
-            'lr': [0.01, 0.005, ],  # 0.005,
+        #
+        'ignd': {
+            'b': [64, ],
+            'lr': [1.0, ],
+            'm': [(0, 0), ],
         },
 
-        'egn': {
-            'b': [256, ],
-            'lr': [0.05, ],
-
-            # ~fixed
-            'reg': [1.0, ],
-            'ls': [False, ],
-            'al': [False, ],
-            'm': [0.0, ],
-        },
+        # 'egn': {
+        #     'b': [256, ],
+        #     'lr': [0.05, ],
+        #
+        #     # ~fixed
+        #     'reg': [1.0, ],
+        #     'ls': [False, ],
+        #     'al': [False, ],
+        #     'm': [0.0, ],
+        # },
     },
 
     'diamonds': {
@@ -100,18 +112,24 @@ SOLVER_HPS = {
         # },
         #
         'adam': {
-            'b': [128, ],
-            'lr': [0.0001, 0.00005, ],  # 0.005, 0.01, 0.05
+            'b': [64, ],
+            'lr': [0.001,  ],  # 0.005, 0.01, 0.05
         },
 
-        'egn': {
-            'b': [128, ],
-            'lr': [0.001, 0.005, ],  # 0.007,
-            'reg': [1.0, ],
-            'ls': [False, True, ],
-            'al': [False, ],
-            'm': [0.0, ],
+        'ignd': {
+            'b': [64, ],
+            'lr': [0.05, ],
+            'm': [(0, 0), ],
         },
+
+        # 'egn': {
+        #     'b': [128, ],
+        #     'lr': [0.001, 0.005, ],  # 0.007,
+        #     'reg': [1.0, ],
+        #     'ls': [False, True, ],
+        #     'al': [False, ],
+        #     'm': [0.0, ],
+        # },
     },
 }
 
@@ -192,6 +210,20 @@ def create_solver(
             regularizer=reg,
             # adaptive_lambda=al,
             batch_size=b,
+        )
+        opt_state = solver.init_state(opt_params)
+    elif solver_type == 'ignd':
+        b, lr, m = solver_config
+
+        solver_id = f'{solver_type}_b{b}_lr{lr}_m{m[0]}_{m[1]}'
+
+        solver = IGND(
+            predict_fun=model_fn,
+            loss_type='mse',
+            learning_rate=lr,
+            batch_size=b,
+            momentum=m[0],
+            beta2=m[1],
         )
         opt_state = solver.init_state(opt_params)
     else:
@@ -346,7 +378,7 @@ if __name__ == '__main__':
                     params = model.init(jax.random.PRNGKey(seed), X_train[0])
 
                     # --------------- init solver ---------------
-                    is_egn_like = solver_type in ['egn', 'hfo', 'sgn', ]
+                    is_egn_like = solver_type in ['egn', 'hfo', 'sgn', 'ignd', ]
                     b = config[0]
 
                     update_fn, opt_params, opt_state, solver_id = create_solver(

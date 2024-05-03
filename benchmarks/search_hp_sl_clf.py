@@ -9,27 +9,28 @@ from scipy.interpolate import interp1d
 from tqdm import tqdm
 
 import jax
-from jax.tree import map as tree_map
+from jax import tree_map
 import jax.numpy as jnp
 import optax
 from jaxopt import OptaxSolver
+from optax._src.loss import poly_loss_cross_entropy
 
 from benchmarks.utils.data_loader import load_data
 from benchmarks.utils import model_zoo as zoo
 from somax import EGN, HFO, SGN
 
-TASK = 'mnist'  # imdb_reviews covtype cifar10 mnist fashion_mnist wine_quality iris a1a sensit
+TASK = 'cifar10'  # imdb_reviews covtype cifar10 mnist fashion_mnist wine_quality iris a1a sensit
 
 GPU = True
 JIT = True
 
 # STEPS = 10_000
 # STEPS = 2_000
-STEPS = 2_00
-EVAL_EVERY = 10
+STEPS = 10_000
+EVAL_EVERY = 50
 # EVAL_EVERY = 1
 
-N_SEEDS = 1
+N_SEEDS = 5
 
 # grid
 # 1.0, 0.5, 0.1, 0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001, 0.00005, 0.00001
@@ -46,16 +47,16 @@ SOLVER_HPS = {
             'lr': [0.005, ],
         },
 
-        'egn': {
-            'b': [32, ],
-            # 'lr': [0.005, ],  # MLP
-            'lr': [0.5, ],  # CNN
-
-            'reg': [1.0, ],
-            'ls': [False, ],
-            'al': [False, ],
-            'm': [0.0, ],
-        },
+        # 'egn': {
+        #     'b': [32, ],
+        #     # 'lr': [0.005, ],  # MLP
+        #     'lr': [0.5, ],  # CNN
+        #
+        #     'reg': [1.0, ],
+        #     'ls': [False, ],
+        #     'al': [False, ],
+        #     'm': [0.0, ],
+        # },
 
     },
 
@@ -109,20 +110,36 @@ SOLVER_HPS = {
         #     'lr': [1.0, ],
         # },
         #
+
         'adam': {
-            'b': [64, ],
+            'b': [32, ],
             'lr': [0.05, ],
         },
 
-        'egn': {
-            'b': [64, ],
-            'lr': [0.5, ],
-
-            'reg': [1.0, ],
-            'ls': [False, ],
-            'al': [False, ],
-            'm': [0.0, ],
+        'adam-poly-a': {
+            'b': [32, ],
+            'lr': [0.05, ],
         },
+
+        'adam-logeps': {
+            'b': [32, ],
+            'lr': [0.05, ],
+        },
+
+        'adam-poly-1': {
+            'b': [32, ],
+            'lr': [0.05, ],
+        },
+
+        # 'egn': {
+        #     'b': [64, ],
+        #     'lr': [0.5, ],
+        #
+        #     'reg': [1.0, ],
+        #     'ls': [False, ],
+        #     'al': [False, ],
+        #     'm': [0.0, ],
+        # },
     },
 
     'iris': {
@@ -136,14 +153,20 @@ SOLVER_HPS = {
             'lr': [0.1, ],
         },
 
-        'egn': {
+        'adam-poly': {
             'b': [32, ],
-            'lr': [1.0, ],
-            'reg': [1.0, ],
-            'ls': [False, ],
-            'al': [False, ],
-            'm': [0.0, ],
+            'lr': [0.1, ],
         },
+
+        #
+        # 'egn': {
+        #     'b': [32, ],
+        #     'lr': [1.0, ],
+        #     'reg': [1.0, ],
+        #     'ls': [False, ],
+        #     'al': [False, ],
+        #     'm': [0.0, ],
+        # },
 
     },
 
@@ -197,19 +220,34 @@ SOLVER_HPS = {
         #     'lr': [0.05,  ],
         # },
         #
-        # 'adam': {
-        #     'b': [64, ],
-        #     'lr': [0.001, ],
-        # },
-
-        'egn': {
+        'adam': {
             'b': [32, ],
-            'lr': [0.5, ],
-            'reg': [1.0, ],
-            'ls': [False, ],
-            'al': [False, ],
-            'm': [0.0, ],
+            'lr': [0.001, ],
         },
+
+        'adam-poly-a': {
+            'b': [32, ],
+            'lr': [0.001, ],
+        },
+
+        'adam-logeps': {
+            'b': [32, ],
+            'lr': [0.001, ],
+        },
+
+        'adam-poly-1': {
+            'b': [32, ],
+            'lr': [0.001, ],
+        },
+
+        # 'egn': {
+        #     'b': [32, ],
+        #     'lr': [0.5, ],
+        #     'reg': [1.0, ],
+        #     'ls': [False, ],
+        #     'al': [False, ],
+        #     'm': [0.0, ],
+        # },
 
     },
 
@@ -235,6 +273,21 @@ def create_solver(
         b, lr = solver_config
         solver_id = f'{solver_type}_b{b}_lr{lr}'
         solver = OptaxSolver(ce if n_classes > 1 else ce_binary, opt=optax.adam(lr))
+        opt_state = solver.init_state(opt_params, X_train[0:5], y_train[0:5])
+    elif solver_type == 'adam-poly-a':
+        b, lr = solver_config
+        solver_id = f'{solver_type}_b{b}_lr{lr}'
+        solver = OptaxSolver(ce_poly, opt=optax.adam(lr))
+        opt_state = solver.init_state(opt_params, X_train[0:5], y_train[0:5])
+    elif solver_type == 'adam-logeps':
+        b, lr = solver_config
+        solver_id = f'{solver_type}_b{b}_lr{lr}'
+        solver = OptaxSolver(ce_logeps, opt=optax.adam(lr))
+        opt_state = solver.init_state(opt_params, X_train[0:5], y_train[0:5])
+    elif solver_type == 'adam-poly-1':
+        b, lr = solver_config
+        solver_id = f'{solver_type}_b{b}_lr{lr}'
+        solver = OptaxSolver(ce_poly1, opt=optax.adam(lr))
         opt_state = solver.init_state(opt_params, X_train[0:5], y_train[0:5])
     elif solver_type == 'egn':
         b, lr, reg, ls, al, m = solver_config
@@ -365,7 +418,7 @@ def plot_metric(results):
     # save plot on disk
     ax.set_ylabel(f'Accuracy on Test Set')
     ax.set_xlabel('Wall Time (s)')
-    ax.legend()
+    ax.legend(loc='lower right')
     # ax.set_yscale('log')
     # ax.set_xlabel(f'Environment Steps ($\\times {scale_str}%$)')
     # ax.set_title(env_name)
@@ -431,6 +484,69 @@ if __name__ == '__main__':
         # 1,
         # average over the batch
         return -jnp.mean(residuals)
+
+
+    @jax.jit
+    def ce_poly(params, X, Y_true):
+        def poly_approx(x):
+            # [   6.03033006  -42.9228469   126.31562928 -155.60993546   66.45858127]
+
+            # return jnp.polyval(coefs, vals)
+            # return 6.03033006 - 42.9228469 * x + 126.31562928 * x * x - 155.60993546 * x ** 3 + 66.45858127 * x ** 4
+            return 1.4002 * (1 - x) + 3.5593 * (1 - x) ** 10
+
+        # b x C
+        logits = predict_fn(params, X)
+
+        # # Using softmax followed by log can lead to numerical instability.
+        # # Instead, we use jax.nn.log_softmax, which combines these operations in a numerically stable way.
+        # # log_probs = jax.nn.log_softmax(logits)
+        #
+        log_probs = - poly_approx(jax.nn.softmax(logits))
+
+        # Compute residuals
+        # If y is one-hot encoded, this operation picks the log probability of the correct class
+        residuals = jnp.sum(Y_true * log_probs, axis=1)
+
+        # scalar
+        ce_loss = -jnp.mean(residuals)
+
+        return ce_loss
+
+
+    @jax.jit
+    def ce_poly1(params, X, Y_true):
+        # b x C
+        logits = predict_fn(params, X)
+
+        residuals = poly_loss_cross_entropy(logits, Y_true)
+
+        # # Using softmax followed by log can lead to numerical instability.
+        # # Instead, we use jax.nn.log_softmax, which combines these operations in a numerically stable way.
+        # # log_probs = jax.nn.log_softmax(logits)
+        #
+        # log_probs = - jnp.log(jax.nn.softmax(logits))
+
+        # Compute residuals
+        # If y is one-hot encoded, this operation picks the log probability of the correct class
+        # residuals = jnp.sum(Y_true * log_probs, axis=1)
+
+        # scalar
+        ce_loss = jnp.mean(residuals)
+
+        # optax.loss.poly_loss_cross_entropy(logits, Y_true)
+
+        return ce_loss
+
+
+    @jax.jit
+    def ce_logeps(params, X, Y_true):
+        logits = predict_fn(params, X)
+        probs = jax.nn.softmax(logits)
+        log_probs = jnp.log(0.001 + probs)
+        residuals = jnp.sum(Y_true * log_probs, axis=1)
+        ce_loss = -jnp.mean(residuals)
+        return ce_loss
 
 
     @jax.jit
