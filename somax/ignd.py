@@ -30,6 +30,8 @@ from jaxopt._src import loop
 class IGNDState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
+    velocity_m: Optional[Any]
+    velocity_v: Optional[Any]
 
 
 @dataclasses.dataclass(eq=False)
@@ -51,6 +53,10 @@ class IGND(base.StochasticSolver):
     pre_update: Optional[Callable] = None
 
     regularizer: float = 1.0
+
+    # Momentum parameters
+    momentum: float = 0.0  # 0.9
+    beta2: float = 0.0  # 0.999
 
     verbose: int = 0
 
@@ -76,6 +82,12 @@ class IGND(base.StochasticSolver):
         else:
             raise ValueError(f"'loss_type' {self.loss_type} not supported")
 
+        # set up momentum
+        if self.momentum < 0. or self.momentum > 1.:
+            raise ValueError(f"'momentum' must belong to closed interval [0,1]")
+        if self.beta2 < 0. or self.beta2 > 1.:
+            raise ValueError(f"'beta2' must belong to closed interval [0,1]")
+
     def update(
             self,
             params: Any,
@@ -93,20 +105,39 @@ class IGND(base.StochasticSolver):
         Returns:
           (params, state)
         """
-
-        # convert params pytree to JAX array
-        params_flat, unflatten_fn = ravel_pytree(params)
-
         # ---------- STEP 1: calculate direction with QR ---------- #
         targets = kwargs['targets']
         direction = self.calculate_direction(params, state, targets, *args)
 
-        # ---------- STEP 2: update parameters ---------- #
+        # ---------- STEP 2: momentum acceleration ---------- #
+        if self.momentum > 0:
+            # direction with bias-corrected momentum
+            # d = (m * v + (1 - m) * d) / (1 - m^t)
+            direction_m = self.momentum * state.velocity_m + (1 - self.momentum) * direction
+            bias_corr_m = 1 - self.momentum ** (state.iter_num + 1)
+
+            if self.beta2 > 0:
+                v_eps = 1e-7
+                direction_v = self.beta2 * state.velocity_v + (1 - self.beta2) * direction * direction
+                bias_corr_v = 1 - self.beta2 ** (state.iter_num + 1)
+                bias_corrected_direction_v = jnp.sqrt(direction_v / bias_corr_v) + v_eps
+                direction = direction_m / bias_corr_m / bias_corrected_direction_v
+            else:
+                direction = direction_m / bias_corr_m
+                direction_v = None
+        else:
+            direction_m = None
+            direction_v = None
+
+        # ---------- STEP 3: update parameters ---------- #
+        params_flat, unflatten_fn = ravel_pytree(params)
         next_params_flat = params_flat + self.learning_rate * direction
         next_params = unflatten_fn(next_params_flat)
 
         next_state = IGNDState(
             iter_num=state.iter_num + 1,
+            velocity_m=direction_m,  # First moment accumulator
+            velocity_v=direction_v,  # First moment accumulator
         )
 
         return base.OptStep(params=next_params, state=next_state)
@@ -116,8 +147,13 @@ class IGND(base.StochasticSolver):
                    *args,
                    **kwargs) -> IGNDState:
 
+        velocity_m = jnp.zeros_like(ravel_pytree(init_params)[0]) if self.momentum > 0 else None
+        velocity_v = jnp.zeros_like(ravel_pytree(init_params)[0]) if self.beta2 > 0 else None
+
         return IGNDState(
             iter_num=jnp.asarray(0),
+            velocity_m=velocity_m,
+            velocity_v=velocity_v,
         )
 
     def optimality_fun(self, params, *args, **kwargs):
@@ -141,6 +177,7 @@ class IGND(base.StochasticSolver):
         # residuals
         r = targets - jnp.squeeze(batch_preds)
 
+        # equivalent to -grad scaled by xi
         direction = J.T @ (xi * r) / self.batch_size
 
         return direction
