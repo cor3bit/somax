@@ -17,7 +17,7 @@ from optax._src.loss import poly_loss_cross_entropy
 
 from benchmarks.utils.data_loader import load_data
 from benchmarks.utils import model_zoo as zoo
-from somax import EGN, HFO, SGN
+import somax
 
 TASK = 'cifar10'  # imdb_reviews covtype cifar10 mnist fashion_mnist wine_quality iris a1a sensit
 
@@ -297,7 +297,7 @@ def create_solver(
 
         solver_id = f'{solver_type}_b{b}_lr{lr}_reg{reg}_{ls_str}_{al_str}_m{m}'
 
-        solver = EGN(
+        solver = somax.EGN(
             predict_fun=predict_fn,
             loss_type='ce',
             learning_rate=lr,
@@ -318,7 +318,7 @@ def create_solver(
         # solver_id = f'{solver_type}_b{b}_lr{lr}_reg{reg}_{ls_str}_{al_str}_m{m}'
         solver_id = f'{solver_type}_b{b}_cg{maxcg}_lr{lr}_reg{reg}'
 
-        solver = HFO(
+        solver = somax.NewtonCG(
             loss_fun=ce if n_classes > 1 else ce_binary,
             maxcg=maxcg,
             learning_rate=lr,
@@ -338,7 +338,7 @@ def create_solver(
 
         solver_id = f'{solver_type}_b{b}_cg{maxcg}_lr{lr}_reg{reg}'
 
-        solver = SGN(
+        solver = somax.SGN(
             predict_fun=predict_fn,
             loss_type='ce',
             maxcg=maxcg,

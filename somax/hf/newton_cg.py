@@ -1,5 +1,5 @@
 """
-Hessian-Free Optimization (HFO):
+Newton-CG Solver:
 - approximate solution to the linear system via the CG method
 - adaptive regularization (lambda)
 - line search
@@ -97,7 +97,7 @@ def armijo_line_search(loss_fun, unroll, jit,
     return ret[:-1]  # remove boolean
 
 
-class HFOState(NamedTuple):
+class NewtonCGState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
     stepsize: float
@@ -106,7 +106,7 @@ class HFOState(NamedTuple):
 
 
 @dataclasses.dataclass(eq=False)
-class HFO(base.StochasticSolver):
+class NewtonCG(base.StochasticSolver):
     # Jacobian of the residual function
     loss_fun: Callable
     maxcg: int = 3
@@ -175,7 +175,7 @@ class HFO(base.StochasticSolver):
     def update(
             self,
             params: Any,
-            state: HFOState,
+            state: NewtonCGState,
             *args,
             **kwargs,
     ) -> base.OptStep:
@@ -263,7 +263,7 @@ class HFO(base.StochasticSolver):
             )
 
         # construct the next state
-        next_state = HFOState(
+        next_state = NewtonCGState(
             iter_num=state.iter_num + 1,  # Next Iteration
             stepsize=stepsize,  # Current alpha
             regularizer=regularizer_next,  # Next lambda
@@ -275,8 +275,8 @@ class HFO(base.StochasticSolver):
     def init_state(self,
                    init_params: Any,
                    *args,
-                   **kwargs) -> HFOState:
-        return HFOState(
+                   **kwargs) -> NewtonCGState:
+        return NewtonCGState(
             iter_num=0,
             stepsize=self.learning_rate,
             regularizer=self.regularizer,

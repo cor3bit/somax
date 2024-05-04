@@ -15,7 +15,7 @@ from jaxopt import OptaxSolver
 
 from benchmarks.utils.data_loader import load_data
 from benchmarks.utils import model_zoo as zoo
-from somax import EGN, HFO, SGN, IGND
+import somax
 
 TASK = 'diamonds'  # california_housing, diamonds, superconduct
 
@@ -161,7 +161,7 @@ def create_solver(
 
         solver_id = f'{solver_type}_b{b}_lr{lr}_reg{reg}_{ls_str}_{al_str}_m{m}'
 
-        solver = EGN(
+        solver = somax.EGN(
             predict_fun=model_fn,
             loss_type='mse',
             learning_rate=lr,
@@ -183,7 +183,7 @@ def create_solver(
         # solver_id = f'{solver_type}_b{b}_lr{lr}_reg{reg}_{ls_str}_{al_str}_m{m}'
         solver_id = f'{solver_type}_b{b}_cg{maxcg}_lr{lr}_reg{reg}'
 
-        solver = HFO(
+        solver = somax.NewtonCG(
             loss_fun=mse,
             maxcg=maxcg,
             learning_rate=lr,
@@ -202,7 +202,7 @@ def create_solver(
 
         solver_id = f'{solver_type}_b{b}_cg{maxcg}_lr{lr}_reg{reg}'
 
-        solver = SGN(
+        solver = somax.SGN(
             predict_fun=model_fn,
             loss_type='mse',
             maxcg=maxcg,
@@ -217,7 +217,7 @@ def create_solver(
 
         solver_id = f'{solver_type}_b{b}_lr{lr}_m{m[0]}_{m[1]}'
 
-        solver = IGND(
+        solver = somax.IGND(
             predict_fun=model_fn,
             loss_type='mse',
             learning_rate=lr,

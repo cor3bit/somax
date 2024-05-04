@@ -1,10 +1,5 @@
 """
-Minimalistic Stochastic Duncan-Guttman (SDG) Solver:
-- exact Jacobian computation via reverse mode autodiff
-- exact Duncan-Guttman matrix inversion
-- fixed learning rate
-- fixed regularization lambda
-- no momentum acceleration
+Incremental Gauss-Newton Descent (IGND) Solver:
 """
 
 from typing import Any

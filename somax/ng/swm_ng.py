@@ -104,7 +104,7 @@ def flatten_3d_jacobian(jac_tree):
     return flattened_jacobians.reshape(-1, flattened_jacobians.shape[-1])
 
 
-class NGState(NamedTuple):
+class SWMNGState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
     # error: float
@@ -116,7 +116,7 @@ class NGState(NamedTuple):
 
 
 @dataclasses.dataclass(eq=False)
-class NG(base.StochasticSolver):
+class SWMNG(base.StochasticSolver):
     # Jacobian of the residual function
     predict_fun: Callable
     jac_fun: Optional[Callable] = None
@@ -211,7 +211,7 @@ class NG(base.StochasticSolver):
     def update(
             self,
             params: Any,
-            state: NGState,
+            state: SWMNGState,
             *args,
             **kwargs,
     ) -> base.OptStep:
@@ -321,7 +321,7 @@ class NG(base.StochasticSolver):
             regularizer_next = state.regularizer
 
         # construct the next state
-        next_state = NGState(
+        next_state = SWMNGState(
             iter_num=state.iter_num + 1,  # Next Iteration
             stepsize=stepsize,  # Current alpha
             regularizer=regularizer_next,  # Next lambda
@@ -333,13 +333,13 @@ class NG(base.StochasticSolver):
     def init_state(self,
                    init_params: Any,
                    *args,
-                   **kwargs) -> NGState:
+                   **kwargs) -> SWMNGState:
         if self.momentum == 0:
             velocity = None
         else:
             velocity = jnp.zeros_like(ravel_pytree(init_params)[0])
 
-        return NGState(
+        return SWMNGState(
             iter_num=jnp.asarray(0),
             stepsize=jnp.asarray(self.learning_rate),
             regularizer=jnp.asarray(self.regularizer),

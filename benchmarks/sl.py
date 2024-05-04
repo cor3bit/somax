@@ -18,7 +18,7 @@ from jaxopt import OptaxSolver
 # EGN
 from benchmarks.utils.data_loader import load_data
 from benchmarks.utils import model_zoo as zoo
-from somax import HFO, EGN, SGN, GNB
+import somax
 
 
 def parse_args():
@@ -194,6 +194,7 @@ if __name__ == '__main__':
 
         return ce_loss
 
+
     @jax.jit
     def ce_binary(params, x, y):
         # b x 1
@@ -278,7 +279,7 @@ if __name__ == '__main__':
         solver = OptaxSolver(loss_fn, opt=adam(args.learning_rate))
     elif opt_id == 'egn':
         is_egn_like = True
-        solver = EGN(
+        solver = somax.EGN(
             predict_fun=predict_fn,
             loss_type='ce' if is_clf else 'mse',
             learning_rate=args.learning_rate,
@@ -292,7 +293,7 @@ if __name__ == '__main__':
         )
     elif opt_id == 'hfo':
         is_egn_like = True
-        solver = HFO(
+        solver = somax.NewtonCG(
             loss_fun=loss_fn,
             maxcg=args.maxcg,
             learning_rate=args.learning_rate,
@@ -302,7 +303,7 @@ if __name__ == '__main__':
         )
     elif opt_id == 'sgn':
         is_egn_like = True
-        solver = SGN(
+        solver = somax.SGN(
             predict_fun=predict_fn,
             loss_type='ce' if is_clf else 'mse',
             maxcg=args.maxcg,

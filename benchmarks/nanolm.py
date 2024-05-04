@@ -9,8 +9,10 @@ import optax
 
 from matplotlib import pyplot as plt
 import tensorflow_datasets as tfds
+from tqdm import tqdm
 
 from benchmarks.utils.model_zoo import NanoLM
+import somax
 
 # platform check
 print("JAX running on", jax.devices()[0].platform.upper())
@@ -156,7 +158,7 @@ def step(key, params, opt_state):
     return params, key, opt_state, loss
 
 
-for i in range(N_ITERATIONS):
+for i in tqdm(range(N_ITERATIONS)):
     var_params, key, opt_state, loss = step(key, var_params, opt_state)
     all_train_losses.append(loss)
 
