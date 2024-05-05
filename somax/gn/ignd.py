@@ -14,6 +14,7 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
+import chex
 
 from jaxopt.tree_util import tree_add_scalar_mul
 from jaxopt.tree_util import tree_scalar_mul, tree_zeros_like
@@ -25,6 +26,7 @@ from jaxopt._src import loop
 class IGNDState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
+    xi: Optional[Any]
     velocity_m: Optional[Any]
     velocity_v: Optional[Any]
 
@@ -34,6 +36,11 @@ class IGND(base.StochasticSolver):
     # Jacobian of the residual function
     predict_fun: Callable
     jac_fun: Optional[Callable] = None
+
+    # Experimental: only for classification problems
+    loss_fun: Optional[Callable] = None
+    loss_grad_fun: Optional[Callable] = None
+    loss_hessian_fun: Optional[Callable] = None
 
     # Loss function parameters
     # loss_fun: Optional[Callable] = None
@@ -67,13 +74,12 @@ class IGND(base.StochasticSolver):
         if self.loss_type == 'mse':
             self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_fun), in_axes=(None, 0))
             self.calculate_direction = self.calculate_direction_mse
-            self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
         # Classification (Cross-Entropy)
         elif self.loss_type == 'ce':
-            self.jac_fun = jax.vmap(jax.jacrev(self.predict_with_aux, has_aux=True), in_axes=(None, 0))
+            self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_with_targets), in_axes=(None, 0, 0))
             self.calculate_direction = self.calculate_direction_ce
-            self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.n_classes * self.batch_size)
-            self.block_diag_template = jnp.eye(self.batch_size).reshape(self.batch_size, 1, self.batch_size, 1)
+            assert self.loss_grad_fun is not None
+            assert self.loss_hessian_fun is not None
         else:
             raise ValueError(f"'loss_type' {self.loss_type} not supported")
 
@@ -102,7 +108,7 @@ class IGND(base.StochasticSolver):
         """
         # ---------- STEP 1: calculate direction with QR ---------- #
         targets = kwargs['targets']
-        direction = self.calculate_direction(params, state, targets, *args)
+        direction, batch_avg_xi = self.calculate_direction(params, state, targets, *args)
 
         # ---------- STEP 2: momentum acceleration ---------- #
         if self.momentum > 0:
@@ -131,6 +137,7 @@ class IGND(base.StochasticSolver):
 
         next_state = IGNDState(
             iter_num=state.iter_num + 1,
+            xi=batch_avg_xi,
             velocity_m=direction_m,  # First moment accumulator
             velocity_v=direction_v,  # First moment accumulator
         )
@@ -147,6 +154,7 @@ class IGND(base.StochasticSolver):
 
         return IGNDState(
             iter_num=jnp.asarray(0),
+            xi=None,
             velocity_m=velocity_m,
             velocity_v=velocity_v,
         )
@@ -167,55 +175,45 @@ class IGND(base.StochasticSolver):
         J = self.flatten_jacobian(jac_tree)
 
         # batch-level xi
-        xi = 1 / (jnp.einsum('ij,ij->i', J, J) + 1e-8)
+        inv_xi = jnp.einsum('ij,ij->i', J, J)
 
         # residuals
         r = targets - jnp.squeeze(batch_preds)
 
         # equivalent to -grad scaled by xi
-        direction = J.T @ (xi * r) / self.batch_size
+        direction = J.T @ (r / inv_xi) / self.batch_size
 
-        return direction
+        return direction, jnp.mean(1 / inv_xi)
 
     def calculate_direction_ce(self, params, state, targets, *args):
-        def flatten_3d_jacobian(jac_tree):
-            flattened_jacobians = jax.vmap(jax.vmap(lambda _: ravel_pytree(_)[0], in_axes=(0,)), in_axes=(0,))(jac_tree)
-            b, c, m = flattened_jacobians.shape
-            J = flattened_jacobians.reshape(-1, m)
-            return J
+        # compute the Jacobian (fwd+bwd mode), heaviest part
+        batch_probs, jac_tree = self.jac_fun(params, targets, *args)
 
-        def build_block_diag(batch):
-            n_dims = self.batch_size * self.n_classes
-            block_diag_q = self.block_diag_template * batch.reshape(
-                self.batch_size, self.n_classes, 1, self.n_classes)
-            return block_diag_q.reshape(n_dims, n_dims)
+        # convert pytree to JAX array (here, Jacobian of the DNN, J_f)
+        J = self.flatten_jacobian(jac_tree)
 
-        def calculate_hess_pieces(probs):
-            return jax.vmap(lambda p: jnp.diag(p) - jnp.outer(p, p))(probs)
+        # equivalent to -grad scaled by xi
+        dldp = self.loss_grad_fun(batch_probs)
 
-        # ------ Start of the function ------ #
-        raise NotImplementedError()
+        # VERIFICATION
+        # dldw = J.T @ dldp / self.batch_size
+        # grads_tree = jax.grad(self.loss_fun)(params, *args, targets=targets)
+        # grads = ravel_pytree(grads_tree)[0]
+        # chex.assert_trees_all_close(dldw, grads, atol=1e-6, )
 
-        # most time-consuming part - calculate the Jacobian by jax.jacrev()
-        jac_tree, logits = self.jac_fun(params, *args)
+        # SGD direction
+        # direction = - dldw
 
-        # convert pytree to 2-D array of stacked Jacobians
-        J = flatten_3d_jacobian(jac_tree)
+        # calculate xi for each sample: (b, )
+        # for each sample, calculate the g^T g
+        jtj = jnp.einsum('ij,ij->i', J, J)
+        q = self.loss_hessian_fun(batch_probs)
+        inv_xi = jtj * q
 
-        # build block diagonal H from logits
-        probs = jax.nn.softmax(logits)
-        hess_logits = calculate_hess_pieces(probs)
+        # equivalent to -grad scaled by xi
+        direction = - J.T @ (dldp / inv_xi) / self.batch_size
 
-        Q = build_block_diag(hess_logits)
-
-        # calculate (pseudo)residuals
-        r = (probs - targets).reshape(-1, )
-
-        # calculate the direction
-        x = jnp.linalg.solve(self.regularizer_array + Q @ J @ J.T, r)
-        direction = -J.T @ x
-
-        return direction
+        return direction, jnp.mean(1 / inv_xi)
 
     def mse(self, params, x, y):
         # b x 1
@@ -244,6 +242,13 @@ class IGND(base.StochasticSolver):
     def predict_with_aux(self, params, *args):
         preds = self.predict_fun(params, *args)
         return preds, preds
+
+    def predict_with_targets(self, params, targets, *args):
+        # preds should be probabilities from the model
+        # targets should be one-hot encoded labels
+        preds = self.predict_fun(params, *args)
+        pred = jnp.vdot(preds, targets)
+        return pred
 
     def __hash__(self):
         # We assume that the attribute values completely determine the solver.
