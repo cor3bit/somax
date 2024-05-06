@@ -117,8 +117,11 @@ class SWMNGState(NamedTuple):
 
 @dataclasses.dataclass(eq=False)
 class SWMNG(base.StochasticSolver):
-    # Jacobian of the residual function
-    predict_fun: Callable
+    # should be provided
+    # predict_fun: Callable
+    loss_fun: Callable
+
+    # filled during initialization
     jac_fun: Optional[Callable] = None
 
     # vectorization axis for Jacobian, None - no vectorization, 0 - batch axis of the tensor
@@ -166,22 +169,26 @@ class SWMNG(base.StochasticSolver):
     def __post_init__(self):
         super().__post_init__()
 
-        self.reference_signature = self.predict_fun
+        self.reference_signature = self.loss_fun
 
         # Regression (MSE)
         if self.loss_type == 'mse':
+            raise NotImplementedError
+            # TODO fix jac_fun as grad(loss)
             self.loss_fun = self.mse
             self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_fun), in_axes=self.jac_axis)
             self.calculate_direction = self.calculate_direction_mse
             self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
         # Classification (Cross-Entropy)
         elif self.loss_type == 'ce' or self.loss_type == 'xe':
-            self.loss_fun = self.ce
+            # self.loss_fun = self.ce
+
+            # TODO
             self.jac_axis = (None, 0, 0)  # default for classification
-            self.jac_fun = jax.vmap(jax.grad(self.ce), in_axes=self.jac_axis)
+            self.jac_fun = jax.vmap(jax.grad(self.loss_fun), in_axes=self.jac_axis)
+
             self.calculate_direction = self.calculate_direction_ce
             self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
-            self.block_diag_template = jnp.eye(self.batch_size).reshape(self.batch_size, 1, self.batch_size, 1)
         else:
             raise ValueError(f"Loss type \'{self.loss_type}\' not supported.")
 
@@ -394,49 +401,49 @@ class SWMNG(base.StochasticSolver):
 
         return direction, grad_loss, L, None
 
-    def mse(self, params, x, y):
-        # b x 1
-        residuals = y - self.predict_fun(params, x)
-
-        # 1,
-        # average over the batch
-        return 0.5 * jnp.mean(jnp.square(residuals))
-
-    def ce(self, params, x, y):
-        # b x C
-        logits = self.predict_fun(params, x)
-
-        # b x C
-        # jax.nn.log_softmax combines exp() and log() in a numerically stable way.
-        log_probs = jax.nn.log_softmax(logits)
-
-        # b x 1
-        # if y is one-hot encoded, this operation picks the log probability of the correct class
-        residuals = jnp.sum(y * log_probs, axis=-1)
-
-        # 1,
-        # average over the batch
-        return -jnp.mean(residuals)
-
-    def ce_with_aux(self, params, x, y):
-        # b x C
-        logits = self.predict_fun(params, x)
-
-        # b x C
-        # jax.nn.log_softmax combines exp() and log() in a numerically stable way.
-        log_probs = jax.nn.log_softmax(logits)
-
-        # b x 1
-        # if y is one-hot encoded, this operation picks the log probability of the correct class
-        residuals = jnp.sum(y * log_probs, axis=-1)
-
-        # 1,
-        # average over the batch
-        return -jnp.mean(residuals), logits
-
-    def predict_with_aux(self, params, *args):
-        preds = self.predict_fun(params, *args)
-        return preds, preds
+    # def mse(self, params, x, y):
+    #     # b x 1
+    #     residuals = y - self.predict_fun(params, x)
+    #
+    #     # 1,
+    #     # average over the batch
+    #     return 0.5 * jnp.mean(jnp.square(residuals))
+    #
+    # def ce(self, params, x, y):
+    #     # b x C
+    #     logits = self.predict_fun(params, x)
+    #
+    #     # b x C
+    #     # jax.nn.log_softmax combines exp() and log() in a numerically stable way.
+    #     log_probs = jax.nn.log_softmax(logits)
+    #
+    #     # b x 1
+    #     # if y is one-hot encoded, this operation picks the log probability of the correct class
+    #     residuals = jnp.sum(y * log_probs, axis=-1)
+    #
+    #     # 1,
+    #     # average over the batch
+    #     return -jnp.mean(residuals)
+    #
+    # def ce_with_aux(self, params, x, y):
+    #     # b x C
+    #     logits = self.predict_fun(params, x)
+    #
+    #     # b x C
+    #     # jax.nn.log_softmax combines exp() and log() in a numerically stable way.
+    #     log_probs = jax.nn.log_softmax(logits)
+    #
+    #     # b x 1
+    #     # if y is one-hot encoded, this operation picks the log probability of the correct class
+    #     residuals = jnp.sum(y * log_probs, axis=-1)
+    #
+    #     # 1,
+    #     # average over the batch
+    #     return -jnp.mean(residuals), logits
+    #
+    # def predict_with_aux(self, params, *args):
+    #     preds = self.predict_fun(params, *args)
+    #     return preds, preds
 
     def __hash__(self):
         # We assume that the attribute values completely determine the solver.
