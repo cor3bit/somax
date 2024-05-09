@@ -10,6 +10,7 @@ from somax.hf.newton_cg import NewtonCG
 # Gauss-Newton Methods
 from somax.gn.egn import EGN
 from somax.gn.fast_egn import FastEGN
+from somax.gn.egn_probs import EGNProb
 from somax.gn.gnb import GNB
 from somax.gn.ignd import IGND
 from somax.gn.lb import LB
