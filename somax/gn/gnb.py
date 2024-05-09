@@ -378,7 +378,7 @@ class GNB(base.StochasticSolver):
             grad_loss = None
 
         # 2st most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
-        temp = jnp.linalg.solve(self.regularizer_array + J @ J.T, residuals)
+        temp = jax.scipy.linalg.solve(self.regularizer_array + J @ J.T, residuals, assume_a='sym')
 
         direction = J.T @ temp
 
@@ -477,7 +477,7 @@ class GNB(base.StochasticSolver):
         #
         # h_gn2 = jnp.outer(new_grad_loss, new_grad_loss)
 
-        temp = jnp.linalg.solve(L @ L.T + self.regularizer_array, L @ grad_loss)
+        temp = jax.scipy.linalg.solve(L @ L.T + self.regularizer_array, L @ grad_loss, assume_a='sym')
         direction = (L.T @ temp - grad_loss) / self.regularizer
 
         # max_norm1 = jnp.max(jnp.abs(grad_loss))

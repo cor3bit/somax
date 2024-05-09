@@ -378,7 +378,7 @@ class LB(base.StochasticSolver):
             grad_loss = None
 
         # 2st most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
-        temp = jnp.linalg.solve(self.regularizer_array + J @ J.T, residuals)
+        temp = jax.scipy.linalg.solve(self.regularizer_array + J @ J.T, residuals, assume_a='sym')
 
         direction = J.T @ temp
 
@@ -394,7 +394,7 @@ class LB(base.StochasticSolver):
         batch_loss_tree = self.jac_fun(params, *args, targets_sampled)
         L = flatten_2d_jacobian(batch_loss_tree)
 
-        temp = jnp.linalg.solve(L @ L.T + self.regularizer_array, L @ grad_loss)
+        temp = jax.scipy.linalg.solve(L @ L.T + self.regularizer_array, L @ grad_loss, assume_a='sym')
         direction = (L.T @ temp - grad_loss) / self.regularizer
 
         return direction, grad_loss, L, None

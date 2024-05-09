@@ -435,7 +435,7 @@ class EGN(base.StochasticSolver):
         # 2nd most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
         # regularizer_t = state.regularizer + self.regularizer_eps
         # regularizer_t = state.regularizer  # from the schedule
-        temp = jnp.linalg.solve(self.regularizer_array + J @ J.T, residuals)
+        temp = jax.scipy.linalg.solve(self.regularizer_array + J @ J.T, residuals, assume_a='sym')
 
         direction = J.T @ temp
 
@@ -473,7 +473,7 @@ class EGN(base.StochasticSolver):
 
         # calculate the direction
         # regularizer_t = state.regularizer
-        temp = jnp.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r)
+        temp = jax.scipy.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r, assume_a='sym')
 
         direction = J.T @ temp
 
@@ -501,7 +501,10 @@ class EGN(base.StochasticSolver):
 
         # calculate the direction
         # regularizer_t = state.regularizer
-        temp = jnp.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r)
+        temp = jax.scipy.linalg.solve(
+            self.regularizer_array + Q @ (J @ J.T), r,
+            assume_a='sym',
+        )
 
         direction = J.T @ temp
 

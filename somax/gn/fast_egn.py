@@ -449,7 +449,7 @@ class FastEGN(base.StochasticSolver):
         # 2nd most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
         # regularizer_t = state.regularizer + self.regularizer_eps
         # regularizer_t = state.regularizer  # from the schedule
-        temp = jnp.linalg.solve(self.regularizer_array + J @ J.T, residuals)
+        temp = jax.scipy.linalg.solve(self.regularizer_array + J @ J.T, residuals, assume_a='sym')
 
         direction = J.T @ temp
 
@@ -469,13 +469,21 @@ class FastEGN(base.StochasticSolver):
         # transform the logits into probabilities, select the probabilities only of the true class
         batch_probs_of_true_class = jnp.sum(targets * jax.nn.softmax(batch_logits), axis=-1)
 
+
+        diag_elems = (batch_probs_of_true_class * (1 - batch_probs_of_true_class))
+        Q = jnp.diag(diag_elems)
+
         # apply Sherman formula to calculate d=-(J^T Q J + lambda I)^(-1)*g
         # adjust Jacobian by (1 - sigma(z))
-        J_ = jnp.diag(1 - batch_probs_of_true_class) @ J / jnp.sqrt(self.batch_size)
+        # J_ = jnp.diag(1 - batch_probs_of_true_class) @ J / jnp.sqrt(self.batch_size)
 
-        temp = jnp.linalg.solve(self.regularizer_array + J_ @ J_.T, J_ @ grad_loss)
+        temp = jax.scipy.linalg.solve(
+            self.regularizer_array + Q @ J @ J.T / self.batch_size,
+            J @ grad_loss,
+            assume_a='sym',
+        )
 
-        direction = (J_.T @ temp - grad_loss) / self.regularizer
+        direction = (J.T @ Q @ temp / self.batch_size - grad_loss) / self.regularizer
 
         # !! DEBUG
         norm_grad = jnp.linalg.norm(grad_loss)
@@ -508,7 +516,7 @@ class FastEGN(base.StochasticSolver):
 
         # calculate the direction
         # regularizer_t = state.regularizer
-        temp = jnp.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r)
+        temp = jax.scipy.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r, assume_a='sym')
 
         direction = J.T @ temp
 
