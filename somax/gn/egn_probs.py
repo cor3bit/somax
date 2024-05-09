@@ -449,10 +449,10 @@ class EGNProb(base.StochasticSolver):
         J = flatten_2d_jacobian(jac_tree)
 
         # build block diagonal H from probs
-        Q = jnp.diag(1 / jnp.square(batch_probs_of_true_class))
+        Q = jnp.diag(1 / batch_probs_of_true_class)
 
         # calculate (pseudo)residuals
-        r = 1/batch_probs_of_true_class
+        r = jnp.ones_like(batch_probs_of_true_class)
 
         # VERIFY: grad_loss is correct
         # grad_loss = -J.T @ r / self.batch_size
@@ -461,13 +461,16 @@ class EGNProb(base.StochasticSolver):
         # diff_inf_norm = jnp.max(jnp.abs(grad_loss - grad_loss_true))
 
         if self.line_search or self.adaptive_lambda:
-            grad_loss = -J.T @ r / self.batch_size
+            grad_loss = -J.T @ (r / batch_probs_of_true_class) / self.batch_size
         else:
             grad_loss = None
 
         # calculate the direction
         # regularizer_t = state.regularizer
-        temp = jnp.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r)
+        temp = jax.scipy.linalg.solve(
+            self.regularizer_array * batch_probs_of_true_class + Q @ (J @ J.T), r,
+            assume_a='sym',
+        )
 
         direction = J.T @ temp
 
