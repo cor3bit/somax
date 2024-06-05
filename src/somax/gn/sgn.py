@@ -107,8 +107,16 @@ class SGN(base.StochasticSolver):
         """
 
         # ---------- STEP 1: calculate direction with DG ---------- #
-        targets = kwargs['targets']
-        direction_tree, grad_loss_tree = self.calculate_direction(params, state, targets, *args)
+        # TODO analyze *args and **kwargs
+        # split (x,y) pair into (x,) and (y,)
+        if 'targets' in kwargs:
+            targets = kwargs['targets']
+            nn_args = args
+        else:
+            targets = args[-1]
+            nn_args = args[:-1]
+
+        direction_tree, grad_loss_tree = self.calculate_direction(params, state, targets, *nn_args)
 
         # # ---------- STEP 2: update (next step) lambda ---------- #
         # TODO

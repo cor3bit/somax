@@ -6,9 +6,11 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from benchmarks.utils.data_loader import load_data
-from benchmarks.utils import model_zoo as zoo
-from somax import HFO
+# from benchmarks.utils.data_loader import load_data
+# from benchmarks.utils import model_zoo as zoo
+from src.somax.hf.newton_cg import NewtonCG
+
+
 
 
 def flatten_hessian(hessian_dict):
@@ -51,7 +53,7 @@ def test_hfo_mse():
     maxcg_iter = 3
 
     # solver
-    solver = HFO(
+    solver = NewtonCG(
         loss_fun=mse,
         maxcg=maxcg_iter,
         learning_rate=alpha,

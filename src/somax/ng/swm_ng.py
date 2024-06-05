@@ -237,8 +237,16 @@ class SWMNG(base.StochasticSolver):
         params_flat, unflatten_fn = ravel_pytree(params)
 
         # ---------- STEP 1: calculate direction with DG ---------- #
-        targets = kwargs['targets']
-        direction, grad_loss, J, Q = self.calculate_direction(params, state, targets, *args)
+        # TODO analyze *args and **kwargs
+        # split (x,y) pair into (x,) and (y,)
+        if 'targets' in kwargs:
+            targets = kwargs['targets']
+            nn_args = args
+        else:
+            targets = args[-1]
+            nn_args = args[:-1]
+
+        direction, grad_loss, J, Q = self.calculate_direction(params, state, targets, *nn_args)
 
         # ---------- STEP 2: line search for alpha ---------- #
         f_cur = None
@@ -249,7 +257,7 @@ class SWMNG(base.StochasticSolver):
 
             goldstein = self.reset_option == 'goldstein'
 
-            f_cur = self.loss_fun(params, *args, targets)
+            f_cur = self.loss_fun(params, *nn_args, targets)
 
             # the directional derivative used for Armijo's line search
             direct_deriv = grad_loss.T @ direction
@@ -258,7 +266,7 @@ class SWMNG(base.StochasticSolver):
 
             stepsize, next_params, f_next = self._armijo_line_search(
                 goldstein, self.maxls, params, f_cur, stepsize, direction_packed, direct_deriv, self._coef,
-                self.decrease_factor, self.increase_factor, self.max_stepsize, args, targets, )
+                self.decrease_factor, self.increase_factor, self.max_stepsize, nn_args, targets, )
         else:
             stepsize = state.stepsize
 
@@ -287,10 +295,10 @@ class SWMNG(base.StochasticSolver):
         # ---------- STEP 4: update (next step) lambda ---------- #
         if self.adaptive_lambda:
             # f_cur can be already computed if line search is used
-            f_cur = self.loss_fun(params, *args, targets) if f_cur is None else f_cur
+            f_cur = self.loss_fun(params, *nn_args, targets) if f_cur is None else f_cur
 
             # if momentum is used, we need to calculate f_next again to take into account the momentum term
-            f_next = self.loss_fun(next_params, *args, targets) if f_next is None or self.momentum > 0 else f_next
+            f_next = self.loss_fun(next_params, *nn_args, targets) if f_next is None or self.momentum > 0 else f_next
 
             # in a good scenario, should be large and negative
             num = f_next - f_cur

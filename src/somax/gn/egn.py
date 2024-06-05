@@ -1,5 +1,10 @@
 """
-GNB Solver with sampling
+Exact Gauss-Newton (EGN) Solver:
+- exact Jacobian computation via reverse mode autodiff
+- exact solution to the linear system via the Duncan-Guttman formula
+- adaptive learning rate (line search)
+- adaptive regularization (lambda)
+- momentum acceleration
 """
 
 from typing import Any
@@ -13,6 +18,7 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
+from optax import sigmoid_binary_cross_entropy
 from jaxopt.tree_util import tree_add_scalar_mul
 from jaxopt._src import base
 from jaxopt._src import loop
@@ -104,7 +110,7 @@ def flatten_3d_jacobian(jac_tree):
     return flattened_jacobians.reshape(-1, flattened_jacobians.shape[-1])
 
 
-class GNBState(NamedTuple):
+class EGNState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
     # error: float
@@ -112,14 +118,16 @@ class GNBState(NamedTuple):
     stepsize: float
     regularizer: float
     # direction_inf_norm: float
-    velocity: Optional[Any]
+    velocity_m: Optional[Any]
+    # velocity_v: Optional[Any]
 
 
 @dataclasses.dataclass(eq=False)
-class GNB(base.StochasticSolver):
+class EGN(base.StochasticSolver):
     # Jacobian of the residual function
     predict_fun: Callable
     jac_fun: Optional[Callable] = None
+    loss_fun: Optional[Callable] = None
 
     # vectorization axis for Jacobian, None - no vectorization, 0 - batch axis of the tensor
     # default value (None, 0,) matches predict_fun(params, X)
@@ -129,7 +137,7 @@ class GNB(base.StochasticSolver):
     loss_type: str = 'mse'  # ['mse', 'ce']
 
     # Either fixed alpha if line_search=False or max_alpha if line_search=True
-    learning_rate: Optional[float] = None
+    learning_rate: Optional[float] = None  # alpha_0
 
     batch_size: Optional[int] = None
 
@@ -148,13 +156,15 @@ class GNB(base.StochasticSolver):
 
     # Adaptive Regularization parameters
     adaptive_lambda: bool = False
-    regularizer: float = 1.0
-    # regularizer_eps: float = 1e-5
+    regularizer: float = 1.0  # lambda_0
+    regularizer_eps: float = 1e-1  # lambda_T
     lambda_decrease_factor: float = 0.99  # default value recommended by Kiros
     lambda_increase_factor: float = 1.01  # default value recommended by Kiros
+    total_iterations: Optional[int] = None
 
     # Momentum parameters
     momentum: float = 0.0
+    # beta2: float = 0.0
 
     pre_update: Optional[Callable] = None
 
@@ -170,21 +180,59 @@ class GNB(base.StochasticSolver):
 
         # Regression (MSE)
         if self.loss_type == 'mse':
-            self.loss_fun = self.mse
+            if self.loss_fun is None:
+                self.loss_fun = self.mse
+
             self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_fun), in_axes=self.jac_axis)
             self.calculate_direction = self.calculate_direction_mse
             self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
         # Classification (Cross-Entropy)
         elif self.loss_type == 'ce' or self.loss_type == 'xe':
-            self.loss_fun = self.ce
-            self.jac_axis = (None, 0, 0)  # default for classification
-            self.jac_fun = jax.vmap(jax.grad(self.ce), in_axes=self.jac_axis)
-            self.grad_fun = jax.grad(self.ce_with_aux, has_aux=True)
-            self.calculate_direction = self.calculate_direction_ce
-            self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
+            if self.n_classes == 1:  # binary classification
+                if self.loss_fun is None:
+                    self.loss_fun = self.ce_binary
+
+                self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_ravel), in_axes=(None, 0))
+                self.calculate_direction = self.calculate_direction_ce_binary
+            else:
+                if self.loss_fun is None:
+                    self.loss_fun = self.ce
+
+                self.jac_fun = jax.vmap(jax.jacrev(self.predict_with_aux, has_aux=True), in_axes=(None, 0))
+                self.calculate_direction = self.calculate_direction_ce
+
+            self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.n_classes * self.batch_size)
             self.block_diag_template = jnp.eye(self.batch_size).reshape(self.batch_size, 1, self.batch_size, 1)
         else:
             raise ValueError(f"Loss type \'{self.loss_type}\' not supported.")
+
+        # set up momentum
+        if self.momentum < 0. or self.momentum > 1.:
+            raise ValueError(f"'momentum' must belong to closed interval [0,1]")
+        # if self.beta2 < 0. or self.beta2 > 1.:
+        #     raise ValueError(f"'beta2' must belong to closed interval [0,1]")
+
+        # set up adaptive regularization
+        if self.adaptive_lambda:
+            raise NotImplementedError("Adaptive regularization is not supported yet.")
+
+        # if self.adaptive_lambda:
+        #     if self.total_iterations is None:
+        #         raise ValueError(f"'total_iterations' must be provided for adaptive regularization")
+        #
+        #     # self.lambda_schedule_fn = linear_schedule(
+        #     #     self.regularizer, self.regularizer_eps, self.total_iterations, )
+        #
+        #     self.lambda_schedule_fn = warmup_exponential_decay_schedule(
+        #         self.regularizer,
+        #         peak_value=self.regularizer,
+        #         warmup_steps=int(self.total_iterations * 0.3),
+        #         transition_steps=int(self.total_iterations * 0.7),
+        #         decay_rate=1e-3,
+        #         end_value=self.regularizer_eps, )
+        #
+        # else:
+        #     self.lambda_schedule_fn = constant_schedule(self.regularizer)
 
         # set up line search
         if self.line_search:
@@ -212,7 +260,7 @@ class GNB(base.StochasticSolver):
     def update(
             self,
             params: Any,
-            state: GNBState,
+            state: EGNState,
             *args,
             **kwargs,
     ) -> base.OptStep:
@@ -226,107 +274,123 @@ class GNB(base.StochasticSolver):
         Returns:
           (params, state)
         """
-
-        # convert pytree to JAX array (w)
-        params_flat, unflatten_fn = ravel_pytree(params)
-
         # ---------- STEP 1: calculate direction with DG ---------- #
-        targets = kwargs['targets']
-        direction, grad_loss, J, Q = self.calculate_direction(params, state, targets, *args)
+        # TODO analyze *args and **kwargs
+        # split (x,y) pair into (x,) and (y,)
+        if 'targets' in kwargs:
+            targets = kwargs['targets']
+            nn_args = args
+        else:
+            targets = args[-1]
+            nn_args = args[:-1]
 
-        # ---------- STEP 2: line search for alpha ---------- #
+
+        direction, grad_loss, J, Q = self.calculate_direction(params, state, targets, *nn_args)
+
+        # ---------- STEP 2: momentum acceleration ---------- #
+        if self.momentum > 0:
+            # direction with bias-corrected momentum
+            # d = (m * v + (1 - m) * d) / (1 - m^t)
+            direction_m = self.momentum * state.velocity_m + (1 - self.momentum) * direction
+            bias_corr_m = 1 - self.momentum ** (state.iter_num + 1)
+            direction = direction_m / bias_corr_m
+
+            # if self.beta2 > 0:
+            #     v_eps = 1e-7
+            #     direction_v = self.beta2 * state.velocity_v + (1 - self.beta2) * direction * direction
+            #     bias_corr_v = 1 - self.beta2 ** (state.iter_num + 1)
+            #     bias_corrected_direction_v = jnp.sqrt(direction_v / bias_corr_v) + v_eps
+            #     direction = direction_m / bias_corr_m / bias_corrected_direction_v
+            # else:
+            #     direction = direction_m / bias_corr_m
+            #     direction_v = None
+        else:
+            direction_m = None
+            # direction_v = None
+
+        # ---------- STEP 3: line search for alpha ---------- #
         f_cur = None
         f_next = None
-        next_params = None
-        if self.line_search:
+        params_flat, unflatten_fn = ravel_pytree(params)
+        if not self.line_search:
+            # constant learning rate
+            stepsize = state.stepsize
+            next_params = unflatten_fn(params_flat + stepsize * direction)
+        else:
             stepsize = self.reset_stepsize(state.stepsize)
 
             goldstein = self.reset_option == 'goldstein'
 
-            f_cur = self.loss_fun(params, *args, targets)
+            f_cur = self.loss_fun(params, *nn_args, targets)
 
             # the directional derivative used for Armijo's line search
             direct_deriv = grad_loss.T @ direction
 
-            direction_packed = unflatten_fn(direction)
+            direction_tree = unflatten_fn(direction)
 
             stepsize, next_params, f_next = self._armijo_line_search(
-                goldstein, self.maxls, params, f_cur, stepsize, direction_packed, direct_deriv, self._coef,
-                self.decrease_factor, self.increase_factor, self.max_stepsize, args, targets, )
-        else:
-            stepsize = state.stepsize
-
-        # ---------- STEP 3: momentum acceleration ---------- #
-        if self.momentum == 0:
-            next_velocity = None
-        else:
-            # next_params = params + stepsize*direction + momentum*(params - previous_params)
-
-            if next_params is None:
-                next_params_flat = params_flat + stepsize * direction
-            else:
-                next_params_flat, _ = ravel_pytree(next_params)
-
-            next_params_flat = next_params_flat + self.momentum * state.velocity
-            next_velocity = next_params_flat - params_flat
-
-            next_params = unflatten_fn(next_params_flat)
-
-        # ! params should be "packed" in a pytree before sending to the OptStep
-        if next_params is None:
-            # the only case is when LS=False, Momentum=0
-            next_params_flat = params_flat + stepsize * direction
-            next_params = unflatten_fn(next_params_flat)
+                goldstein, self.maxls, params, f_cur, stepsize,
+                direction_tree, direct_deriv, self._coef,
+                self.decrease_factor, self.increase_factor,
+                self.max_stepsize, nn_args, targets,
+            )
 
         # ---------- STEP 4: update (next step) lambda ---------- #
-        if self.adaptive_lambda:
-            # f_cur can be already computed if line search is used
-            f_cur = self.loss_fun(params, *args, targets) if f_cur is None else f_cur
+        # TODO: adaptive lambda is currently disabled
+        regularizer_next = state.regularizer
 
-            # if momentum is used, we need to calculate f_next again to take into account the momentum term
-            f_next = self.loss_fun(next_params, *args, targets) if f_next is None or self.momentum > 0 else f_next
+        # switch to lambda(t) schedule
+        # regularizer_next = self.lambda_schedule_fn(state.iter_num + 1)
 
-            # in a good scenario, should be large and negative
-            num = f_next - f_cur
+        # if not self.adaptive_lambda:
+        #     # constant lambda
+        #     regularizer_next = state.regularizer
+        # else:
+        #     # f_cur can be already computed if line search is used
+        #     f_cur = self.loss_fun(params, *args, targets) if f_cur is None else f_cur
+        #
+        #     # f_next can be already computed if line search is used
+        #
+        #     # next_params_no_alpha = unflatten_fn(params_flat + direction)
+        #
+        #     f_next = self.loss_fun(next_params, *args, targets) if f_next is None else f_next
+        #
+        #     # in a good scenario, should be large and negative
+        #     num = f_next - f_cur
+        #
+        #     delta_w = stepsize * direction
+        #
+        #     b = targets.shape[0]
+        #
+        #     # dimensions: (b x d) @ (d x 1) = (b x 1)
+        #     mvp = J @ delta_w
+        #     if Q is None:
+        #         denom = grad_loss.T @ delta_w + 0.5 * mvp.T @ mvp / b
+        #     else:
+        #         denom = grad_loss.T @ delta_w + 0.5 * mvp.T @ Q @ mvp / b
+        #
+        #     # negative denominator means that the direction is a descent direction
+        #     rho = num / denom
+        #
+        #     regularizer_next = lax.cond(
+        #         rho < 0.25,
+        #         lambda _: self.lambda_increase_factor * state.regularizer,
+        #         lambda _: lax.cond(
+        #             rho > 0.75,
+        #             lambda _: self.lambda_decrease_factor * state.regularizer,
+        #             lambda _: state.regularizer,
+        #             None,
+        #         ),
+        #         None,
+        #     )
 
-            if self.momentum > 0:
-                delta_w = next_velocity
-            else:
-                delta_w = stepsize * direction
-
-            b = targets.shape[0]
-
-            # dimensions: (b x d) @ (d x 1) = (b x 1)
-            mvp = J @ delta_w
-            if Q is None:
-                denom = grad_loss.T @ delta_w + 0.5 * mvp.T @ mvp / b
-            else:
-                denom = grad_loss.T @ delta_w + 0.5 * mvp.T @ Q @ mvp / b
-
-            # negative denominator means that the direction is a descent direction
-
-            rho = num / denom
-
-            regularizer_next = lax.cond(
-                rho < 0.25,
-                lambda _: self.lambda_increase_factor * state.regularizer,
-                lambda _: lax.cond(
-                    rho > 0.75,
-                    lambda _: self.lambda_decrease_factor * state.regularizer,
-                    lambda _: state.regularizer,
-                    None,
-                ),
-                None,
-            )
-        else:
-            regularizer_next = state.regularizer
-
-        # construct the next state
-        next_state = GNBState(
+        # construct next state
+        next_state = EGNState(
             iter_num=state.iter_num + 1,  # Next Iteration
             stepsize=stepsize,  # Current alpha
             regularizer=regularizer_next,  # Next lambda
-            velocity=next_velocity,  # Next velocity
+            velocity_m=direction_m,  # First moment accumulator
+            # velocity_v=direction_v,  # Second moment accumulator
         )
 
         return base.OptStep(params=next_params, state=next_state)
@@ -334,17 +398,17 @@ class GNB(base.StochasticSolver):
     def init_state(self,
                    init_params: Any,
                    *args,
-                   **kwargs) -> GNBState:
-        if self.momentum == 0:
-            velocity = None
-        else:
-            velocity = jnp.zeros_like(ravel_pytree(init_params)[0])
+                   **kwargs) -> EGNState:
 
-        return GNBState(
-            iter_num=jnp.asarray(0),
-            stepsize=jnp.asarray(self.learning_rate),
-            regularizer=jnp.asarray(self.regularizer),
-            velocity=velocity,
+        velocity_m = jnp.zeros_like(ravel_pytree(init_params)[0]) if self.momentum > 0 else None
+        # velocity_v = jnp.zeros_like(ravel_pytree(init_params)[0]) if self.beta2 > 0 else None
+
+        return EGNState(
+            iter_num=0,
+            stepsize=self.learning_rate,
+            regularizer=self.regularizer,
+            velocity_m=velocity_m,
+            # velocity_v=velocity_v,
         )
 
     def optimality_fun(self, params, *args, **kwargs):
@@ -377,7 +441,9 @@ class GNB(base.StochasticSolver):
         else:
             grad_loss = None
 
-        # 2st most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
+        # 2nd most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
+        # regularizer_t = state.regularizer + self.regularizer_eps
+        # regularizer_t = state.regularizer  # from the schedule
         temp = jax.scipy.linalg.solve(self.regularizer_array + J @ J.T, residuals, assume_a='sym')
 
         direction = J.T @ temp
@@ -385,113 +451,73 @@ class GNB(base.StochasticSolver):
         return direction, grad_loss, J, None
 
     def calculate_direction_ce(self, params, state, targets, *args):
-        # prepare keys for vmap() sampling
-        # keys = jax.random.split(jax.random.PRNGKey(state.iter_num), num=self.batch_size)
+        def calculate_hess_pieces(probs):
+            return jax.vmap(lambda p: jnp.diag(p) - jnp.outer(p, p))(probs)
 
-        # OPTION 1
+        def build_block_diag(hess_pieces):
+            n_dims = self.batch_size * self.n_classes
+            block_diag_q = self.block_diag_template * hess_pieces.reshape(
+                self.batch_size, self.n_classes, 1, self.n_classes)
+            return block_diag_q.reshape(n_dims, n_dims)
+
+        # ------ Start of the function ------ #
         # 1st most time-consuming part - calculate the Jacobian by jax.jacrev()
-        # (selected_logits, (selected_probs, mask)), jac_tree = self.jac_fun(params, keys, *args)
+        jac_tree, batch_logits = self.jac_fun(params, *args)
 
-        # jac_tree = self.jac_fun(params, *args, targets)
-        #
-        # # convert a pytree (b, m) to a 2D array of stacked Jacobians
-        # J = flatten_2d_jacobian(jac_tree)
-        #
-        # # build a (b x b) diagonal matrix
-        # # Q = jnp.diag(selected_probs * (1 - selected_probs))
-        #
-        # # calculate (pseudo-)residuals
-        # # selected_targets = jnp.sum(targets * mask, axis=-1)
-        # # r = selected_targets - selected_probs #).reshape(-1, )
-        # r = jnp.ones((self.batch_size,))
-        #
-        # if self.line_search or self.adaptive_lambda:
-        #     grad_loss = J.T @ r / self.batch_size
-        # else:
-        #     grad_loss = None
-        #
-        # # calculate the direction
-        # temp = jnp.linalg.solve(self.regularizer_array + J @ J.T, -r)
-        #
-        # direction = J.T @ temp
+        # convert a 3D pytree (b, c, m) to a 2D array of stacked Jacobians
+        J = flatten_3d_jacobian(jac_tree)
 
-        # OPTION 2
-        # !! notice that the real targets (y) are used
-        grad_loss_tree, logits = self.grad_fun(params, *args, targets)
-        grad_loss = ravel_pytree(grad_loss_tree)[0]
+        # build block diagonal H from logits
+        probs = jax.nn.softmax(batch_logits)
+        hess_logits = calculate_hess_pieces(probs)
+        Q = build_block_diag(hess_logits)
 
-        # sample labels (y_hat)
-        # Note: sampling is done separately
-        # logits = predict_fn(params, x)
+        # calculate (pseudo)residuals
+        r = (targets - probs).reshape(-1, )
 
-        # n_samples = 10
-        #
-        # keys = jax.random.split(jax.random.PRNGKey(state.iter_num), num=n_samples)
-        #
-        # L = jnp.zeros((self.batch_size, grad_loss.shape[0]))
-        #
-        # for key in keys:
-        #
-        #     samples = jax.random.categorical(key, logits=logits)
-        #     targets_sampled = jax.nn.one_hot(samples, num_classes=self.n_classes)
-        #
-        #     # !! notice that the sampled targets (y_hat) are used
-        #     # batch_loss_tree = self.jac_fun(params, *args, targets)
-        #     batch_loss_tree = self.jac_fun(params, *args, targets_sampled)
-        #     Ls = flatten_2d_jacobian(batch_loss_tree)
-        #
-        #     L = L + Ls
-        #
-        # L = L / n_samples
-
-        # no sampling, just largest logits
-        # samples = jnp.argmax(logits, axis=-1)
-        # targets_sampled = jax.nn.one_hot(samples, num_classes=self.n_classes)
-
-        # sampling
-        key = jax.random.PRNGKey(state.iter_num)
-        samples = jax.random.categorical(key, logits=logits)
-        targets_sampled = jax.nn.one_hot(samples, num_classes=self.n_classes)
-
-
-        batch_loss_tree = self.jac_fun(params, *args, targets_sampled)
-        L = flatten_2d_jacobian(batch_loss_tree)
-
-
-        # original
-        # H_lm = L.T @ L + jnp.eye(L.shape[1]) * self.regularizer * self.batch_size
-        # H_lm_inv = jnp.linalg.inv(H_lm)
-
-        # calculate with Woodbury formula
-        # aa = jnp.linalg.inv(self.regularizer_array + L @ L.T)
-        # bb = jnp.eye(L.shape[1]) - L.T @ aa @ L
-        # H_lm_inv2 = bb / self.regularizer / self.batch_size
-        #
-        # direction = - H_lm_inv2 @ grad_loss * self.batch_size
-
-        # h_gn = L.T @ L / self.batch_size
-        #
-        # new_grad_fn = jax.grad(self.ce)
-        # new_grad_loss_tree = new_grad_fn(params, *args, targets_sampled)
-        # new_grad_loss = ravel_pytree(new_grad_loss_tree)[0]
-        #
-        # h_gn2 = jnp.outer(new_grad_loss, new_grad_loss)
-
-        temp = jax.scipy.linalg.solve(L @ L.T + self.regularizer_array, L @ grad_loss, assume_a='sym')
-        direction = (L.T @ temp - grad_loss) / self.regularizer
-
-        # max_norm1 = jnp.max(jnp.abs(grad_loss))
-        # max_norm2 = jnp.max(jnp.abs(L))
-        # max_norm3 = jnp.max(jnp.abs(temp))
-        # max_norm4 = jnp.max(jnp.abs(direction))
-
-        # diff = jnp.linalg.norm(direction - direction2)
+        if self.line_search or self.adaptive_lambda:
+            grad_loss = -J.T @ r / self.batch_size
+        else:
+            grad_loss = None
 
         # calculate the direction
-        # temp = jnp.linalg.solve(self.regularizer_array + L @ L.T, L @ grad_loss)
-        # direction = self.batch_size * L.T @ temp
+        # regularizer_t = state.regularizer
+        temp = jax.scipy.linalg.solve(self.regularizer_array + Q @ (J @ J.T), r, assume_a='sym')
 
-        return direction, grad_loss, L, None
+        direction = J.T @ temp
+
+        return direction, grad_loss, J, Q
+
+    def calculate_direction_ce_binary(self, params, state, targets, *args):
+        # 1st most time-consuming part - calculate the Jacobian by jax.jacrev()
+        batch_logits, jac_tree = self.jac_fun(params, *args)
+
+        # convert a 3D pytree (b, c, m) to a 2D array of stacked Jacobians
+        J = flatten_2d_jacobian(jac_tree)
+
+        # build block diagonal H from logits
+        probs = jax.nn.sigmoid(batch_logits)
+
+        Q = jnp.diag(probs * (1 - probs))
+
+        # calculate (pseudo)residuals
+        r = targets.reshape(-1, ) - probs
+
+        if self.line_search or self.adaptive_lambda:
+            grad_loss = -J.T @ r / self.batch_size
+        else:
+            grad_loss = None
+
+        # calculate the direction
+        # regularizer_t = state.regularizer
+        temp = jax.scipy.linalg.solve(
+            self.regularizer_array + Q @ (J @ J.T), r,
+            assume_a='sym',
+        )
+
+        direction = J.T @ temp
+
+        return direction, grad_loss, J, Q
 
     def mse(self, params, x, y):
         # b x 1
@@ -517,44 +543,24 @@ class GNB(base.StochasticSolver):
         # average over the batch
         return -jnp.mean(residuals)
 
-    def ce_with_aux(self, params, x, y):
-        # b x C
+    def ce_binary(self, params, x, y):
+        # b x 1
         logits = self.predict_fun(params, x)
 
-        # b x C
-        # jax.nn.log_softmax combines exp() and log() in a numerically stable way.
-        log_probs = jax.nn.log_softmax(logits)
-
         # b x 1
-        # if y is one-hot encoded, this operation picks the log probability of the correct class
-        residuals = jnp.sum(y * log_probs, axis=-1)
+        loss = sigmoid_binary_cross_entropy(logits.ravel(), y)
 
         # 1,
         # average over the batch
-        return -jnp.mean(residuals), logits
+        return jnp.mean(loss)
 
     def predict_with_aux(self, params, *args):
         preds = self.predict_fun(params, *args)
         return preds, preds
 
-    def predict_on_sampled_labels(self, params, key, *args):
-        # raw prediction scores (logits) from the model: b x c
-        logits = self.predict_fun(params, *args)
-
-        # stop gradient flow through samples
-        logits_stop = jax.lax.stop_gradient(logits)
-
-        # sample labels from the logits (1 from c classes): b x 1
-        samples = jax.random.categorical(key, logits=logits_stop)
-
-        mask = jax.nn.one_hot(samples, self.n_classes)
-        mask_stop = jax.lax.stop_gradient(mask)
-
-        # based on the sampled labels, select the logits and probabilities
-        selected_logits = jnp.sum(logits * mask_stop, axis=-1)
-        selected_probs = jnp.sum(jax.nn.softmax(logits) * mask_stop, axis=-1)
-
-        return selected_logits, (selected_probs, mask_stop)
+    def predict_ravel(self, params, *args):
+        preds = self.predict_fun(params, *args)
+        return preds[0]
 
     def __hash__(self):
         # We assume that the attribute values completely determine the solver.

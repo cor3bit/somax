@@ -1,3 +1,6 @@
 jax
 optax
 jaxopt>=0.8.2
+flax
+pytest
+scikit-learn

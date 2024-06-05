@@ -191,8 +191,16 @@ class NewtonCG(base.StochasticSolver):
         """
 
         # ---------- STEP 1: calculate direction with DG ---------- #
-        targets = kwargs['targets']
-        direction_tree, grad_loss_tree = self.calculate_direction(params, state, targets, *args)
+        # TODO analyze *args and **kwargs
+        # split (x,y) pair into (x,) and (y,)
+        if 'targets' in kwargs:
+            targets = kwargs['targets']
+            nn_args = args
+        else:
+            targets = args[-1]
+            nn_args = args[:-1]
+
+        direction_tree, grad_loss_tree = self.calculate_direction(params, state, targets, *nn_args)
 
         # ---------- STEP 2: line search for alpha ---------- #
         f_cur = None
@@ -207,7 +215,7 @@ class NewtonCG(base.StochasticSolver):
 
             goldstein = self.reset_option == 'goldstein'
 
-            f_cur = self.loss_fun(params, *args, targets)
+            f_cur = self.loss_fun(params, *nn_args, targets)
 
             # the directional derivative used for Armijo's line search
             direction, _ = ravel_pytree(direction_tree)
@@ -218,7 +226,7 @@ class NewtonCG(base.StochasticSolver):
                 goldstein, self.maxls, params, f_cur, stepsize,
                 direction_tree, direct_deriv, self._coef,
                 self.decrease_factor, self.increase_factor,
-                self.max_stepsize, args, targets,
+                self.max_stepsize, nn_args, targets,
             )
 
         # ---------- STEP 3: update (next step) lambda ---------- #
@@ -228,14 +236,14 @@ class NewtonCG(base.StochasticSolver):
         else:
             # numerator: in a good scenario, should be large and negative
             if f_cur is None:
-                f_cur = self.loss_fun(params, *args, targets)
+                f_cur = self.loss_fun(params, *nn_args, targets)
             if f_next is None:
-                f_next = self.loss_fun(next_params, *args, targets)
+                f_next = self.loss_fun(next_params, *nn_args, targets)
 
             num = f_next - f_cur
 
             # denominator
-            Hv_tree = self.hvp(params, direction_tree, targets, *args)
+            Hv_tree = self.hvp(params, direction_tree, targets, *nn_args)
 
             # flattening stage
             Hv, _ = ravel_pytree(Hv_tree)

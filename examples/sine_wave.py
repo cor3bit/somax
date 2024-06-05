@@ -5,8 +5,7 @@ import flax.linen as nn
 from somax import EGN
 
 if __name__ == '__main__':
-    jax.config.update('jax_platform_name', 'cpu')
-
+    # jax.config.update('jax_platform_name', 'cpu')
 
     @jax.jit
     def mse(params, x, y):
@@ -31,30 +30,32 @@ if __name__ == '__main__':
     # initialize parameters
     params = model.init(jax.random.PRNGKey(1), x)
 
+    batch_size = 16
+
     # define the solver
     solver = EGN(
         predict_fun=model.apply,
         loss_type='mse',
         learning_rate=0.1,
         regularizer=1.0,
-        batch_size=16,
+        batch_size=batch_size,
     )
     opt_state = solver.init_state(params)
-    update_fn = jax.jit(solver.update)
 
-    # train the model
-    batch_size = 16
+    # update function is automatically jit-ed
+    update_fn = solver.update
+
+    # manual training loop
     for i in range(10):
-        # print the loss on the whole training data
+        # print the loss across the entire dataset
         loss = mse(params, x, y)
         print(f'T={i}, loss: {loss:.4f}')
 
         # make a step
         batch_x = x[i * batch_size:(i + 1) * batch_size]
         batch_y = y[i * batch_size:(i + 1) * batch_size]
-        params, opt_state = update_fn(
-            params, opt_state, batch_x, targets=batch_y)
+        params, opt_state = update_fn(params, opt_state, batch_x, batch_y)
 
-    # print the loss on the whole training data
+    # print the loss across the entire dataset
     loss = mse(params, x, y)
     print(f'T={i + 1}, loss: {loss:.4f}')

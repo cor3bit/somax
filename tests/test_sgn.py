@@ -1,14 +1,16 @@
 import pytest
 
 import numpy as np
+from sklearn import datasets as skl_datasets
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
+from flax import linen as nn
 
-from benchmarks.utils.data_loader import load_data
-from benchmarks.utils import model_zoo as zoo
-from somax import SGN
+from src.somax.gn.sgn import SGN
 
 
 def flatten_2d_jacobian(jac_tree):
@@ -57,6 +59,34 @@ def calculate_gn_hessian_mse(predict_fn, params, batch_X, batch_y, b):
     return H_gn
 
 
+class MLPRegressorMini(nn.Module):
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        x = nn.Dense(4)(x)
+        x = nn.relu(x)
+        x = nn.Dense(4)(x)
+        x = nn.relu(x)
+        x = nn.Dense(1)(x)
+
+        x = jnp.squeeze(x)
+
+        return x
+
+
+class MLPClassifierMini(nn.Module):
+    num_classes: int
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        x = nn.Dense(4)(x)
+        x = nn.relu(x)
+        x = nn.Dense(4)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.num_classes)(x)
+
+        return x
+
+
 # @pytest.mark.skip(reason="For debugging only")
 def test_sgn_mse():
     @jax.jit
@@ -75,7 +105,7 @@ def test_sgn_mse():
     maxcg_iter = 10
 
     # model
-    model = zoo.MLPRegressorMini()
+    model = MLPRegressorMini()
     predict_fn = jax.jit(model.apply)
 
     # solver
@@ -89,9 +119,9 @@ def test_sgn_mse():
     )
 
     # dataset
-    dataset_id = 'california_housing'
-    (X_train, X_test, Y_train, Y_test), is_clf, n_classes = load_data(
-        dataset_id, test_size=0.1, seed=seed)
+    X, Y = skl_datasets.fetch_california_housing(return_X_y=True)
+    X_scaled = StandardScaler(copy=False).fit_transform(X)
+    X_train, X_test, Y_train, Y_test = train_test_split(X_scaled, Y, test_size=0.1, random_state=1337)
 
     # init sover state and params
     params = model.init(rng, X_train[0])
@@ -180,7 +210,7 @@ def test_sgn_ce():
     maxcg_iter = 10
 
     # model
-    model = zoo.MLPClassifierMini(c)
+    model = MLPClassifierMini(c)
     predict_fn = jax.jit(model.apply)
 
     # solver

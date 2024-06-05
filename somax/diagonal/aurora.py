@@ -1,4 +1,0 @@
- # TODO
-
-class Aurora:
-    pass
