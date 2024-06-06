@@ -1,16 +1,13 @@
 import pytest
 
 import numpy as np
-from sklearn import datasets as skl_datasets
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
-from flax import linen as nn
 
-from src.somax.gn.sgn import SGN
+from src import SGN
+from utils import load_california, load_iris, MLPRegressorMini, MLPClassifierMini
 
 
 def flatten_2d_jacobian(jac_tree):
@@ -59,35 +56,7 @@ def calculate_gn_hessian_mse(predict_fn, params, batch_X, batch_y, b):
     return H_gn
 
 
-class MLPRegressorMini(nn.Module):
-    @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(1)(x)
-
-        x = jnp.squeeze(x)
-
-        return x
-
-
-class MLPClassifierMini(nn.Module):
-    num_classes: int
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.num_classes)(x)
-
-        return x
-
-
-# @pytest.mark.skip(reason="For debugging only")
+# @pytest.mark.skip(reason="Disable test for debugging purposes")
 def test_sgn_mse():
     @jax.jit
     def mse(params, x, y):
@@ -102,94 +71,100 @@ def test_sgn_mse():
     rng = jax.random.PRNGKey(seed)
     b = 32
     regularizer = 1.0
-    maxcg_iter = 10
+
+    # dataset
+    X_train, X_test, Y_train, Y_test = load_california()
 
     # model
     model = MLPRegressorMini()
+
     predict_fn = jax.jit(model.apply)
 
-    # solver
-    solver = SGN(
-        predict_fun=predict_fn,
-        loss_type='mse',
-        maxcg=maxcg_iter,
-        learning_rate=1.0,
-        regularizer=regularizer,
-        batch_size=b,
-    )
+    max_diffs = {
+        2: 0.01,
+        10: 1e-5,
+        50: 1e-5,
 
-    # dataset
-    X, Y = skl_datasets.fetch_california_housing(return_X_y=True)
-    X_scaled = StandardScaler(copy=False).fit_transform(X)
-    X_train, X_test, Y_train, Y_test = train_test_split(X_scaled, Y, test_size=0.1, random_state=1337)
+    }
 
-    # init sover state and params
-    params = model.init(rng, X_train[0])
-    opt_state = solver.init_state(params)
+    true_losses = {
+        2: np.array([3.1070921, 0.98605144, 0.4565691, 0.4050824, 0.37491602, 0.33616212, ]),
+        10: np.array([3.1070921, 0.98780066, 0.45470968, 0.4062884, 0.3772855, 0.317104, ]),
+        50: np.array([3.1070921, 0.98780066, 0.45470968, 0.4062884, 0.3772855, 0.317104, ]),
+    }
 
-    params_flat, pack_fn = ravel_pytree(params)
-    d = params_flat.shape[0]
+    for maxcg_iter in [2, 10, 50]:
+        # print(f"maxcg_iter: {maxcg_iter}")
 
-    # --------------- verify hvp and mvp ---------------
-    batch_X = X_train[:b, :]
-    batch_y = Y_train[:b]
+        params = model.init(rng, X_train[0])
+        params_flat, pack_fn = ravel_pytree(params)
+        d = params_flat.shape[0]
 
-    vec = jax.random.normal(rng, (d,))
-    vec_tree = pack_fn(vec)
+        # solver
+        solver = SGN(
+            predict_fun=predict_fn,
+            loss_type='mse',
+            maxcg=maxcg_iter,
+            learning_rate=1.0,
+            regularizer=regularizer,
+            batch_size=b,
+        )
 
-    gnhvp_sgn_tree = solver.gnhvp(params, vec_tree, batch_y, batch_X)
-    gnhvp_sgn = ravel_pytree(gnhvp_sgn_tree)[0]
+        # init sover state and params
+        opt_state = solver.init_state(params)
 
-    # manual
-    true_gn_hess = calculate_gn_hessian_mse(predict_fn, params, batch_X, batch_y, b)
-    gnhvp_true = true_gn_hess @ vec
+        # --------------- verify hvp and mvp ---------------
+        batch_X = X_train[:b, :]
+        batch_y = Y_train[:b]
 
-    assert jnp.allclose(gnhvp_sgn, gnhvp_true, atol=1e-5), "GN HVP mismatch"
+        vec = jax.random.normal(rng, (d,))
+        vec_tree = pack_fn(vec)
 
-    # --------------- verify CG solver ---------------
-    dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
-    dir_sgn = ravel_pytree(dir_tree)[0]
+        gnhvp_sgn_tree = solver.gnhvp(params, vec_tree, batch_y, batch_X)
+        gnhvp_sgn = ravel_pytree(gnhvp_sgn_tree)[0]
 
-    # manual, Hd=-g
-    grad_loss_tree = jax.grad(mse)(params, batch_X, batch_y)
-    grad_loss = ravel_pytree(grad_loss_tree)[0]
-    reg_gn_hess = true_gn_hess + jnp.eye(d) * regularizer
-    dir_true = jnp.linalg.solve(reg_gn_hess, -grad_loss)
+        # manual
+        true_gn_hess = calculate_gn_hessian_mse(predict_fn, params, batch_X, batch_y, b)
+        gnhvp_true = true_gn_hess @ vec
 
-    dir_diff = jnp.max(jnp.abs(dir_sgn - dir_true))
+        assert jnp.allclose(gnhvp_sgn, gnhvp_true, atol=1e-5), "GN HVP mismatch"
 
-    if maxcg_iter == 2:
-        assert dir_diff < 0.01, "Direction mismatch"
-    elif maxcg_iter == 10:
-        assert dir_diff < 1e-5, "Direction mismatch"
-    elif maxcg_iter == 50:
-        assert dir_diff < 1e-5, "Direction mismatch"
-    else:
-        raise ValueError(f"Unknown maxcg_iter: {maxcg_iter}")
+        # --------------- verify CG solver ---------------
+        dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
+        dir_sgn = ravel_pytree(dir_tree)[0]
 
-    # --------------- verify calculation ---------------
+        # manual, Hd=-g
+        grad_loss_tree = jax.grad(mse)(params, batch_X, batch_y)
+        grad_loss = ravel_pytree(grad_loss_tree)[0]
+        reg_gn_hess = true_gn_hess + jnp.eye(d) * regularizer
+        dir_true = jnp.linalg.solve(reg_gn_hess, -grad_loss)
 
-    loss_t0 = mse(params, X_test, Y_test)
+        dir_diff = jnp.max(jnp.abs(dir_sgn - dir_true))
 
-    # update
-    test_set_loss = [loss_t0]
-    for i in range(5):
-        batch_X = X_train[i * b:(i + 1) * b, :]
-        batch_y = Y_train[i * b:(i + 1) * b]
+        assert dir_diff < max_diffs[maxcg_iter], "Direction mismatch"
 
-        params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
+        # --------------- verify calculation ---------------
 
-        test_set_loss.append(mse(params, X_test, Y_test))
+        loss_t0 = mse(params, X_test, Y_test)
 
-    realized_losses = jnp.array(test_set_loss)
+        # update
+        test_set_loss = [loss_t0]
+        for i in range(5):
+            batch_X = X_train[i * b:(i + 1) * b, :]
+            batch_y = Y_train[i * b:(i + 1) * b]
 
-    actual_losses = jnp.array(np.array(
-        [3.1070921, 0.96741265, 0.49240723, 0.39509234, 0.37976882, 0.34163678, ]))
+            params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
 
-    assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"
+            test_set_loss.append(mse(params, X_test, Y_test))
+
+        realized_losses = jnp.array(test_set_loss)
+
+        actual_losses = jnp.array(true_losses[maxcg_iter])
+
+        assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"
 
 
-# @pytest.mark.skip(reason="For debugging only")
+# @pytest.mark.skip(reason="Disable test for debugging purposes")
 def test_sgn_ce():
     @jax.jit
     def ce(params, inputs, labels_ohe):
@@ -205,92 +180,94 @@ def test_sgn_ce():
     seed = 1337
     rng = jax.random.PRNGKey(seed)
     b = 32
-    c = 3
     regularizer = 1.0
-    maxcg_iter = 10
+
+    # dataset
+    (X_train, X_test, Y_train, Y_test), is_clf, c = load_iris()
 
     # model
     model = MLPClassifierMini(c)
     predict_fn = jax.jit(model.apply)
 
-    # solver
-    solver = SGN(
-        predict_fun=predict_fn,
-        loss_type='ce',
-        maxcg=maxcg_iter,
-        learning_rate=1.0,
-        regularizer=regularizer,
-        batch_size=b,
-        n_classes=c,
-    )
+    max_diffs = {
+        2: 0.001,
+        10: 1e-6,
+        50: 1e-6,
+    }
 
-    # dataset
-    dataset_id = 'iris'
-    (X_train, X_test, Y_train, Y_test), is_clf, n_classes = load_data(
-        dataset_id, test_size=0.1, seed=seed)
-    Y_test = jax.nn.one_hot(Y_test, c)
+    true_losses = {
+        2: np.array([1.1646403, 1.1155982, 1.0912483, 0.9720879, 0.8604481, 0.7592329, ]),
+        10: np.array([1.1646403, 1.1158458, 1.09132, 0.97225153, 0.86185616, 0.7586591, ]),
+        50: np.array([1.1646403, 1.1158458, 1.09132, 0.97225153, 0.86185616, 0.7586591, ]),
+    }
 
-    # init sover state and params
-    params = model.init(rng, X_train[0])
-    opt_state = solver.init_state(params)
+    for maxcg_iter in [2, 10, 50, ]:
+        print(f"maxcg_iter: {maxcg_iter}")
 
-    params_flat, pack_fn = ravel_pytree(params)
-    d = params_flat.shape[0]
+        # solver
+        solver = SGN(
+            predict_fun=predict_fn,
+            loss_type='ce',
+            maxcg=maxcg_iter,
+            learning_rate=1.0,
+            regularizer=regularizer,
+            batch_size=b,
+            n_classes=c,
+        )
 
-    # --------------- verify hvp and mvp ---------------
-    batch_X = X_train[:b, :]
-    batch_y = Y_train[:b]
+        # init sover state and params
+        params = model.init(rng, X_train[0])
+        opt_state = solver.init_state(params)
 
-    vec = jax.random.normal(rng, (d,))
-    vec_tree = pack_fn(vec)
+        params_flat, pack_fn = ravel_pytree(params)
+        d = params_flat.shape[0]
 
-    gnhvp_sgn_tree = solver.gnhvp(params, vec_tree, batch_y, batch_X)
-    gnhvp_sgn = ravel_pytree(gnhvp_sgn_tree)[0]
+        # --------------- verify hvp and mvp ---------------
+        batch_X = X_train[:b, :]
+        batch_y = Y_train[:b]
 
-    # manual
-    true_gn_hess = calculate_gn_hessian_ce(predict_fn, params, batch_X, batch_y, b, c)
-    gnhvp_true = true_gn_hess @ vec
+        vec = jax.random.normal(rng, (d,))
+        vec_tree = pack_fn(vec)
 
-    assert jnp.allclose(gnhvp_sgn, gnhvp_true, atol=1e-5), "GN HVP mismatch"
+        gnhvp_sgn_tree = solver.gnhvp(params, vec_tree, batch_y, batch_X)
+        gnhvp_sgn = ravel_pytree(gnhvp_sgn_tree)[0]
 
-    # --------------- verify CG solver ---------------
-    dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
-    dir_sgn = ravel_pytree(dir_tree)[0]
+        # manual
+        true_gn_hess = calculate_gn_hessian_ce(predict_fn, params, batch_X, batch_y, b, c)
+        gnhvp_true = true_gn_hess @ vec
 
-    # manual, Hd=-g
-    grad_loss_tree = jax.grad(ce)(params, batch_X, batch_y)
-    grad_loss = ravel_pytree(grad_loss_tree)[0]
-    reg_gn_hess = true_gn_hess + jnp.eye(d) * regularizer
-    dir_true = jnp.linalg.solve(reg_gn_hess, -grad_loss)
+        assert jnp.allclose(gnhvp_sgn, gnhvp_true, atol=1e-5), "GN HVP mismatch"
 
-    dir_diff = jnp.max(jnp.abs(dir_sgn - dir_true))
+        # --------------- verify CG solver ---------------
+        dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
+        dir_sgn = ravel_pytree(dir_tree)[0]
 
-    if maxcg_iter == 2:
-        assert dir_diff < 0.001, "Direction mismatch"
-    elif maxcg_iter == 10:
-        assert dir_diff < 1e-6, "Direction mismatch"
-    elif maxcg_iter == 100:
-        assert dir_diff < 1e-6, "Direction mismatch"
-    else:
-        raise ValueError(f"Unknown maxcg_iter: {maxcg_iter}")
+        # manual, Hd=-g
+        grad_loss_tree = jax.grad(ce)(params, batch_X, batch_y)
+        grad_loss = ravel_pytree(grad_loss_tree)[0]
+        reg_gn_hess = true_gn_hess + jnp.eye(d) * regularizer
+        dir_true = jnp.linalg.solve(reg_gn_hess, -grad_loss)
 
-    # --------------- verify calculation ---------------
+        dir_diff = jnp.max(jnp.abs(dir_sgn - dir_true))
 
-    loss_t0 = ce(params, X_test, Y_test)
+        assert dir_diff < max_diffs[maxcg_iter], "Direction mismatch"
 
-    # update
-    test_set_loss = [loss_t0]
-    for i in range(5):
-        batch_X = X_train[i * b:(i + 1) * b, :]
-        batch_y = Y_train[i * b:(i + 1) * b]
+        # --------------- verify calculation ---------------
 
-        params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
+        loss_t0 = ce(params, X_test, Y_test)
 
-        test_set_loss.append(ce(params, X_test, Y_test))
+        # update
+        test_set_loss = [loss_t0]
+        for i in range(5):
+            batch_X = X_train[i * b:(i + 1) * b, :]
+            batch_y = Y_train[i * b:(i + 1) * b]
 
-    realized_losses = jnp.array(test_set_loss)
+            params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
 
-    actual_losses = jnp.array(np.array(
-        [1.1646405, 1.1309346, 1.0883108, 1.021174, 0.7846394, 0.62611365]))
+            test_set_loss.append(ce(params, X_test, Y_test))
 
-    assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"
+        realized_losses = jnp.array(test_set_loss)
+
+        actual_losses = jnp.array(true_losses[maxcg_iter])
+
+        assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"

@@ -13,6 +13,9 @@ setuptools.setup(
     description='SOMAX: Second-Order Methods for Machine Learning in JAX',
     long_description=read('README.md'),
     classifiers=[
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Developers',
+        'Intended Audience :: Science/Research',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',

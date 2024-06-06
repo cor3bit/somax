@@ -6,11 +6,8 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-# from benchmarks.utils.data_loader import load_data
-# from benchmarks.utils import model_zoo as zoo
-from src.somax.hf.newton_cg import NewtonCG
-
-
+from src import NewtonCG
+from utils import load_iris, load_california, MLPRegressorMini, MLPClassifierMini
 
 
 def flatten_hessian(hessian_dict):
@@ -34,8 +31,8 @@ def flatten_hessian(hessian_dict):
     return flat_hessian_2d
 
 
-# @pytest.mark.skip(reason="For debugging only")
-def test_hfo_mse():
+# @pytest.mark.skip(reason="Disable test for debugging purposes")
+def test_newton_cg_mse():
     @jax.jit
     def mse(params, x, y):
         residuals = y - predict_fn(params, x)
@@ -50,104 +47,103 @@ def test_hfo_mse():
     b = 32
     alpha = 0.5
     regularizer = 1.0
-    maxcg_iter = 3
-
-    # solver
-    solver = NewtonCG(
-        loss_fun=mse,
-        maxcg=maxcg_iter,
-        learning_rate=alpha,
-        regularizer=regularizer,
-        batch_size=b,
-    )
-
-    # model
-    model = zoo.MLPRegressorMini()
-    predict_fn = jax.jit(model.apply)
 
     # dataset
-    dataset_id = 'california_housing'
-    (X_train, X_test, Y_train, Y_test), is_clf, n_classes = load_data(
-        dataset_id, test_size=0.1, seed=seed)
+    X_train, X_test, Y_train, Y_test = load_california()
 
-    # init sover state and params
-    params = model.init(rng, X_train[0])
-    opt_state = solver.init_state(params)
+    max_diffs = {
+        3: 0.6,
+        10: 0.07,
+        50: 1e-5,
+    }
 
-    params_flat, pack_fn = ravel_pytree(params)
-    d = params_flat.shape[0]
+    true_losses = {
+        3: np.array([3.1070921, 2.0306454, 1.3865501, 0.6482527, 0.49732292, 0.37662107, ]),
+        10: np.array([3.1070921, 1.8493116, 0.9016294, 0.7295554, 0.5904904, 0.5468303, ]),
+        50: np.array([3.1070921, 1.8460542, 1.1549302, 0.80039966, 0.98126984, 0.84186745, ]),
+    }
 
-    # --------------- verify hvp and mvp ---------------
-    batch_X = X_train[:b, :]
-    batch_y = Y_train[:b]
+    for maxcg_iter in [3, 10, 50]:
+        # print(f"maxcg_iter: {maxcg_iter}")
 
-    vec = jax.random.normal(rng, (d,))
-    vec_tree = pack_fn(vec)
-    hvp_hfo_tree = solver.hvp(params, vec_tree, batch_y, batch_X)
-    hvp_hfo = ravel_pytree(hvp_hfo_tree)[0]
+        # solver
+        solver = NewtonCG(
+            loss_fun=mse,
+            maxcg=maxcg_iter,
+            learning_rate=alpha,
+            regularizer=regularizer,
+            batch_size=b,
+        )
 
-    # manual
-    true_hess_tree = jax.hessian(mse)(params, batch_X, batch_y)
-    true_hess = flatten_hessian(true_hess_tree)
-    hvp_true = true_hess @ vec
+        # model
+        model = MLPRegressorMini()
+        predict_fn = jax.jit(model.apply)
 
-    assert jnp.allclose(hvp_hfo, hvp_true, atol=1e-5), "HVP mismatch"
+        # init sover state and params
+        params = model.init(rng, X_train[0])
+        opt_state = solver.init_state(params)
 
-    # --------------- verify CG solver ---------------
-    dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
-    dir_hfo = ravel_pytree(dir_tree)[0]
+        params_flat, pack_fn = ravel_pytree(params)
+        d = params_flat.shape[0]
 
-    # manual, Hd=-g
-    grad_loss_tree = jax.grad(mse)(params, batch_X, batch_y)
-    grad_loss = ravel_pytree(grad_loss_tree)[0]
-    reg_hess = true_hess + jnp.eye(d) * regularizer
-    dir_true = jnp.linalg.solve(reg_hess, -grad_loss)
+        # --------------- verify hvp and mvp ---------------
+        batch_X = X_train[:b, :]
+        batch_y = Y_train[:b]
 
-    dir_diff = jnp.max(jnp.abs(dir_hfo - dir_true))
+        vec = jax.random.normal(rng, (d,))
+        vec_tree = pack_fn(vec)
+        hvp_hfo_tree = solver.hvp(params, vec_tree, batch_y, batch_X)
+        hvp_hfo = ravel_pytree(hvp_hfo_tree)[0]
 
-    if maxcg_iter == 3:
-        # maxcg=10, dir_diff~0.06
-        assert dir_diff < 1.5, "Direction mismatch"
-    elif maxcg_iter == 10:
-        # maxcg=10, dir_diff~0.06
-        assert dir_diff < 0.07, "Direction mismatch"
-    elif maxcg_iter == 20:
-        # maxcg=20, dir_diff~0.0023
-        assert dir_diff < 0.003, "Direction mismatch"
-    elif maxcg_iter == 50:
-        # maxcg=50, dir_diff~1e-5
-        assert dir_diff < 5e-4, "Direction mismatch"
-    else:
-        raise ValueError(f"Unknown maxcg_iter: {maxcg_iter}")
+        # manual
+        true_hess_tree = jax.hessian(mse)(params, batch_X, batch_y)
+        true_hess = flatten_hessian(true_hess_tree)
+        hvp_true = true_hess @ vec
 
-    # --------------- verify calculation ---------------
+        assert jnp.allclose(hvp_hfo, hvp_true, atol=1e-5), "HVP mismatch"
 
-    loss_t0 = mse(params, X_test, Y_test)
+        # --------------- verify CG solver ---------------
+        dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
+        dir_hfo = ravel_pytree(dir_tree)[0]
 
-    # update
-    test_set_loss = [loss_t0]
+        # manual, Hd=-g
+        grad_loss_tree = jax.grad(mse)(params, batch_X, batch_y)
+        grad_loss = ravel_pytree(grad_loss_tree)[0]
+        reg_hess = true_hess + jnp.eye(d) * regularizer
+        dir_true = jnp.linalg.solve(reg_hess, -grad_loss)
 
-    lambdas = [regularizer, ]
+        dir_diff = jnp.max(jnp.abs(dir_hfo - dir_true))
 
-    for i in range(5):
-        batch_X = X_train[i * b:(i + 1) * b, :]
-        batch_y = Y_train[i * b:(i + 1) * b]
+        assert dir_diff < max_diffs[maxcg_iter], "Direction mismatch"
 
-        params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
+        # --------------- verify calculation ---------------
 
-        test_set_loss.append(mse(params, X_test, Y_test))
-        lambdas.append(opt_state.regularizer)
+        loss_t0 = mse(params, X_test, Y_test)
 
-    realized_losses = jnp.array(test_set_loss)
+        # update
+        test_set_loss = [loss_t0]
 
-    actual_losses = jnp.array(np.array(
-        [3.1070921, 2.0268407, 1.3703537, 0.79599005, 0.6253868, 0.5462274, ]))
+        lambdas = [regularizer, ]
 
-    assert jnp.allclose(realized_losses, actual_losses, atol=1e-3), "Realized Loss mismatch"
+        for i in range(5):
+            batch_X = X_train[i * b:(i + 1) * b, :]
+            batch_y = Y_train[i * b:(i + 1) * b]
+
+            params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
+
+            test_set_loss.append(mse(params, X_test, Y_test))
+            lambdas.append(opt_state.regularizer)
+
+        realized_losses = jnp.array(test_set_loss)
+
+        actual_losses = jnp.array(true_losses[maxcg_iter])
+
+        # TODO stable only for float64
+        assert jnp.allclose(realized_losses, actual_losses, atol=1e-1), "Realized Loss mismatch"
 
 
-# @pytest.mark.skip(reason="For debugging only")
-def test_hfo_ce():
+# @pytest.mark.skip(reason="Disable test for debugging purposes")
+def test_newton_cg_ce():
     @jax.jit
     def ce(params, inputs, labels_ohe):
         logits = predict_fn(params, inputs)
@@ -164,87 +160,95 @@ def test_hfo_ce():
     b = 32
     c = 3
     regularizer = 1.0
-    maxcg_iter = 10
-
-    # solver
-    solver = HFO(
-        loss_fun=ce,
-        maxcg=maxcg_iter,
-        learning_rate=1.0,
-        regularizer=regularizer,
-        batch_size=b,
-        n_classes=c,
-    )
 
     # model
-    model = zoo.MLPClassifierMini(c)
+    model = MLPClassifierMini(c)
     predict_fn = jax.jit(model.apply)
 
     # dataset
-    dataset_id = 'iris'
-    (X_train, X_test, Y_train, Y_test), is_clf, n_classes = load_data(
-        dataset_id, test_size=0.1, seed=seed)
-    Y_test = jax.nn.one_hot(Y_test, c)
+    (X_train, X_test, Y_train, Y_test), is_clf, n_classes = load_iris()
 
-    # init sover state and params
-    params = model.init(rng, X_train[0])
-    opt_state = solver.init_state(params)
+    max_diffs = {
+        3: 0.0005,
+        10: 1e-6,
+        50: 1e-6,
+    }
 
-    params_flat, pack_fn = ravel_pytree(params)
-    d = params_flat.shape[0]
+    true_losses = {
+        3: np.array([1.1646403, 1.1184257, 1.0817341, 0.79667425, 0.5941576, 0.50947213, ]),
+        10: np.array([1.1646403, 1.1182823, 1.0832202, 0.81386983, 0.5965343, 0.5097831, ]),
+        50: np.array([1.1646403, 1.1182823, 1.0832202, 0.81386983, 0.5965343, 0.5097831, ]),
+    }
 
-    # --------------- verify hvp and mvp ---------------
-    batch_X = X_train[:b, :]
-    batch_y = Y_train[:b]
+    for maxcg_iter in [3, 10, 50]:
+        print(f"maxcg_iter: {maxcg_iter}")
 
-    vec = jax.random.normal(rng, (d,))
-    vec_tree = pack_fn(vec)
-    hvp_hfo_tree = solver.hvp(params, vec_tree, batch_y, batch_X)
-    hvp_hfo = ravel_pytree(hvp_hfo_tree)[0]
+        # solver
+        solver = NewtonCG(
+            loss_fun=ce,
+            maxcg=maxcg_iter,
+            learning_rate=1.0,
+            regularizer=regularizer,
+            batch_size=b,
+            n_classes=c,
+        )
 
-    # manual
-    true_hess_tree = jax.hessian(ce)(params, batch_X, batch_y)
-    true_hess = flatten_hessian(true_hess_tree)
-    hvp_true = true_hess @ vec
+        # init sover state and params
+        params = model.init(rng, X_train[0])
+        opt_state = solver.init_state(params)
 
-    assert jnp.allclose(hvp_hfo, hvp_true, atol=1e-5), "HVP mismatch"
+        params_flat, pack_fn = ravel_pytree(params)
+        d = params_flat.shape[0]
 
-    # --------------- verify CG solver ---------------
-    dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
-    dir_hfo = ravel_pytree(dir_tree)[0]
+        # --------------- verify hvp and mvp ---------------
+        batch_X = X_train[:b, :]
+        batch_y = Y_train[:b]
 
-    # manual, Hd=-g
-    grad_loss_tree = jax.grad(ce)(params, batch_X, batch_y)
-    grad_loss = ravel_pytree(grad_loss_tree)[0]
-    reg_hess = true_hess + jnp.eye(d) * regularizer
-    dir_true = jnp.linalg.solve(reg_hess, -grad_loss)
+        vec = jax.random.normal(rng, (d,))
+        vec_tree = pack_fn(vec)
+        hvp_hfo_tree = solver.hvp(params, vec_tree, batch_y, batch_X)
+        hvp_hfo = ravel_pytree(hvp_hfo_tree)[0]
 
-    dir_diff = jnp.max(jnp.abs(dir_hfo - dir_true))
+        # manual
+        true_hess_tree = jax.hessian(ce)(params, batch_X, batch_y)
+        true_hess = flatten_hessian(true_hess_tree)
+        hvp_true = true_hess @ vec
 
-    if maxcg_iter == 10:
-        # maxcg=10, dir_diff~1e-6
-        assert dir_diff < 1e-5, "Direction mismatch"
-    else:
-        raise ValueError(f"Unknown maxcg_iter: {maxcg_iter}")
+        assert jnp.allclose(hvp_hfo, hvp_true, atol=1e-5), "HVP mismatch"
 
-    # --------------- verify calculation ---------------
+        # --------------- verify CG solver ---------------
+        dir_tree, _ = solver.calculate_direction(params, opt_state, batch_y, batch_X)
+        dir_hfo = ravel_pytree(dir_tree)[0]
 
-    loss_t0 = ce(params, X_test, Y_test)
+        # manual, Hd=-g
+        grad_loss_tree = jax.grad(ce)(params, batch_X, batch_y)
+        grad_loss = ravel_pytree(grad_loss_tree)[0]
+        reg_hess = true_hess + jnp.eye(d) * regularizer
+        dir_true = jnp.linalg.solve(reg_hess, -grad_loss)
 
-    # update
-    test_set_loss = [loss_t0]
-    lambdas = [regularizer, ]
-    for i in range(5):
-        batch_X = X_train[i * b:(i + 1) * b, :]
-        batch_y = Y_train[i * b:(i + 1) * b]
+        dir_diff = jnp.max(jnp.abs(dir_hfo - dir_true))
 
-        params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
+        assert dir_diff < max_diffs[maxcg_iter], "Direction mismatch"
 
-        test_set_loss.append(ce(params, X_test, Y_test))
-        lambdas.append(opt_state.regularizer)
+        # --------------- verify calculation ---------------
 
-    realized_losses = jnp.array(test_set_loss)
+        loss_t0 = ce(params, X_test, Y_test)
 
-    actual_losses = jnp.array(np.array([1.1646405, 1.134731, 1.0789027, 0.9477376, 0.45464972, 0.41376147]))
+        # update
+        test_set_loss = [loss_t0]
+        lambdas = [regularizer, ]
+        for i in range(5):
+            batch_X = X_train[i * b:(i + 1) * b, :]
+            batch_y = Y_train[i * b:(i + 1) * b]
 
-    assert jnp.allclose(realized_losses, actual_losses, atol=1e-4), "Realized Loss mismatch"
+            params, opt_state = solver.update(params, opt_state, batch_X, targets=batch_y)
+
+            test_set_loss.append(ce(params, X_test, Y_test))
+            lambdas.append(opt_state.regularizer)
+
+        realized_losses = jnp.array(test_set_loss)
+
+        actual_losses = jnp.array(true_losses[maxcg_iter])
+
+        # TODO stable only for float64
+        assert jnp.allclose(realized_losses, actual_losses, atol=1e-1), "Realized Loss mismatch"

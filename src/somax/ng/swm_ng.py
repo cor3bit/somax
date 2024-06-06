@@ -97,13 +97,6 @@ def flatten_2d_jacobian(jac_tree):
     return jax.vmap(lambda _: ravel_pytree(_)[0], in_axes=(0,))(jac_tree)
 
 
-def flatten_3d_jacobian(jac_tree):
-    flattened_jacobians = jax.vmap(flatten_2d_jacobian)(jac_tree)
-    # b, c, m = flattened_jacobians.shape
-    # J = flattened_jacobians.reshape(-1, m)
-    return flattened_jacobians.reshape(-1, flattened_jacobians.shape[-1])
-
-
 class SWMNGState(NamedTuple):
     """Named tuple containing state information."""
     iter_num: int
@@ -171,26 +164,9 @@ class SWMNG(base.StochasticSolver):
 
         self.reference_signature = self.loss_fun
 
-        # Regression (MSE)
-        if self.loss_type == 'mse':
-            raise NotImplementedError
-            # TODO fix jac_fun as grad(loss)
-            self.loss_fun = self.mse
-            self.jac_fun = jax.vmap(jax.value_and_grad(self.predict_fun), in_axes=self.jac_axis)
-            self.calculate_direction = self.calculate_direction_mse
-            self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
-        # Classification (Cross-Entropy)
-        elif self.loss_type == 'ce' or self.loss_type == 'xe':
-            # self.loss_fun = self.ce
-
-            # TODO
-            self.jac_axis = (None, 0, 0)  # default for classification
-            self.jac_fun = jax.vmap(jax.grad(self.loss_fun), in_axes=self.jac_axis)
-
-            self.calculate_direction = self.calculate_direction_ce
-            self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
-        else:
-            raise ValueError(f"Loss type \'{self.loss_type}\' not supported.")
+        self.jac_axis = (None, 0, 0)  # default for classification
+        self.jac_fun = jax.vmap(jax.grad(self.loss_fun), in_axes=self.jac_axis)
+        self.regularizer_array = self.batch_size * self.regularizer * jnp.eye(self.batch_size)
 
         # set up line search
         if self.line_search:
@@ -236,7 +212,7 @@ class SWMNG(base.StochasticSolver):
         # convert pytree to JAX array (w)
         params_flat, unflatten_fn = ravel_pytree(params)
 
-        # ---------- STEP 1: calculate direction with DG ---------- #
+        # ---------- STEP 1: calculate direction with SWM ---------- #
         # TODO analyze *args and **kwargs
         # split (x,y) pair into (x,) and (y,)
         if 'targets' in kwargs:
@@ -375,30 +351,7 @@ class SWMNG(base.StochasticSolver):
         stepsize = stepsize * self.increase_factor
         return jnp.minimum(stepsize, self.max_stepsize)
 
-    def calculate_direction_mse(self, params, state, targets, *args):
-        # 1st most time-consuming part - calculate the Jacobian of the Neural Net
-        batch_preds, jac_tree = self.jac_fun(params, *args)
-
-        # convert pytree to JAX array (here, J_f)
-        J = flatten_2d_jacobian(jac_tree)
-
-        residuals = targets - jnp.squeeze(batch_preds)
-
-        if self.line_search or self.adaptive_lambda:
-            # !! we need a minus sign here because J is a Jacobian of f(w) not J of r(w)
-            # since r(w)=y-f(w), J_r = -J_f
-            grad_loss = -J.T @ residuals / self.batch_size
-        else:
-            grad_loss = None
-
-        # 2st most time-consuming part - solve the linear system of dimension (batch_size x batch_size)
-        temp = jax.scipy.linalg.solve(self.regularizer_array + J @ J.T, residuals, assume_a='sym')
-
-        direction = J.T @ temp
-
-        return direction, grad_loss, J, None
-
-    def calculate_direction_ce(self, params, state, targets, *args):
+    def calculate_direction(self, params, state, targets, *args):
         batch_loss_tree = self.jac_fun(params, *args, targets)
         L = flatten_2d_jacobian(batch_loss_tree)
 

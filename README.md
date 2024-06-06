@@ -11,8 +11,6 @@ Currently supported methods:
 - Diagonal Scaling:
     - [AdaHessian](https://ojs.aaai.org/index.php/AAAI/article/view/17275)
   (ported from [Nestor Demeure's implementation](https://github.com/nestordemeure/AdaHessianJax));
-    - [Sophia](https://arxiv.org/abs/2305.14342) 
-  (ported from [levanter implementation](https://github.com/stanford-crfm/levanter/blob/main/src/levanter/optim/sophia.py));
 - Hessian-free Optimisation:
     - [Newton-CG](https://epubs.siam.org/doi/10.1137/10079923X);
 - Quasi-Newton:
@@ -25,6 +23,11 @@ Currently supported methods:
 
 
 Future releases:
+- Add support for separate "gradient batches" 
+and "curvature batches" for all solvers; 
+- Port Sophia from [levanter implementation](https://github.com/stanford-crfm/levanter/blob/main/src/levanter/optim/sophia.py).
+
+
 
 ⚠️ Since JAXopt is being merged into Optax, 
 Somax at some point will switch to the Optax API.  
@@ -46,6 +49,8 @@ Requires [JAXopt](https://github.com/patrick-kidger/equinox) 0.8.2+.
 
 
 ```py
+from somax import EGN
+
 # initialize the solver
 solver = EGN(
     predict_fun=model.apply,
@@ -103,8 +108,8 @@ of resources for second-order optimization methods in machine learning.
 
 Some of the implementations are based on the following repositories:
 
-- AdaHessian: 
+- AdaHessian: https://github.com/nestordemeure/AdaHessianJax
 
-- Sophia 
+- Sophia: https://github.com/stanford-crfm/levanter/blob/main/src/levanter/optim/sophia.py 
 
-- Line Search 
+- Line Search: https://github.com/google/jaxopt/blob/main/jaxopt/_src/armijo_sgd.py
