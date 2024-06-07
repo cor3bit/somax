@@ -5,84 +5,13 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
-from flax import linen as nn
 
 from src import SWMNG
-from utils import load_california, load_iris
+from utils import load_california, load_iris, MLPRegressorMini, MLPClassifierMini
 
 
 def flatten_2d_jacobian(jac_tree):
     return jax.vmap(lambda _: ravel_pytree(_)[0], in_axes=(0,))(jac_tree)
-
-
-def flatten_3d_jacobian(jac_tree):
-    flattened_jacobians = jax.vmap(flatten_2d_jacobian)(jac_tree)
-    # b, c, m = flattened_jacobians.shape
-    # J = flattened_jacobians.reshape(-1, m)
-    return flattened_jacobians.reshape(-1, flattened_jacobians.shape[-1])
-
-
-def calculate_gn_hessian_ce(predict_fn, params, batch_X, batch_y, b, c):
-    def calculate_hess_pieces(probs):
-        return jax.vmap(lambda p: jnp.diag(p) - jnp.outer(p, p))(probs)
-
-    def build_block_diag(hess_pieces):
-        n_dims = b * c
-        block_diag_template = jnp.eye(b).reshape(b, 1, b, 1)
-        block_diag_q = block_diag_template * hess_pieces.reshape(b, c, 1, c)
-        return block_diag_q.reshape(n_dims, n_dims)
-
-    jac_fn = jax.jacrev(predict_fn)
-
-    jac_tree = jac_fn(params, batch_X)
-    J = flatten_3d_jacobian(jac_tree)
-
-    # build block diagonal H from logits
-    batch_logits = predict_fn(params, batch_X)
-    probs = jax.nn.softmax(batch_logits)
-    hess_logits = calculate_hess_pieces(probs)
-    Q = build_block_diag(hess_logits)
-
-    H_gn = J.T @ Q @ J / b
-
-    return H_gn
-
-
-def calculate_gn_hessian_mse(predict_fn, params, batch_X, batch_y, b):
-    jac_fn = jax.jacrev(predict_fn)
-    jac_tree = jac_fn(params, batch_X)
-    J = flatten_2d_jacobian(jac_tree)
-    H_gn = J.T @ J / b
-
-    return H_gn
-
-
-class MLPRegressorMini(nn.Module):
-    @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(1)(x)
-
-        x = jnp.squeeze(x)
-
-        return x
-
-
-class MLPClassifierMini(nn.Module):
-    num_classes: int
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(4)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.num_classes)(x)
-
-        return x
 
 
 # @pytest.mark.skip(reason="Disable test for debugging purposes")
