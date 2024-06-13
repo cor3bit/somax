@@ -82,7 +82,7 @@ def block_diag(batch):
     return result.reshape(b * n, b * m)
 
 
-def test_mse_derivation():
+def test_egn_mse():
     # jax.config.update("jax_disable_jit", True)
 
     # seeding
@@ -181,7 +181,7 @@ def test_mse_derivation():
     assert update_diff < 1e-6, "Update() error"
 
 
-def test_xe_from_logits_derivation():
+def test_egn_ce():
     # jax.config.update("jax_disable_jit", True)
 
     # seeding
