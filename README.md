@@ -1,7 +1,7 @@
 <h1 align='center'>Somax</h1>
 
 <p align='center'>
-  <img src="assets/somax_logo_mini.png" alt="logo" width="200px"/>
+  <img src="assets/somax_logo_mini.png" alt="logo" width="250px"/>
 </p>
 
 Somax is a library of Second-Order Methods for stochastic optimization
