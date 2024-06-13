@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jax import grad, hessian
 from jax.flatten_util import ravel_pytree
 
-from src import EGN
+from somax import EGN
 
 
 def predict_fn_mse(params, x):

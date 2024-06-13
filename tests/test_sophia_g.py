@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from src import SophiaG
+from somax import SophiaG
 from utils import load_california, load_iris, MLPRegressorMini, MLPClassifierMini
 
 

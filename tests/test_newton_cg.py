@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from src import NewtonCG
+from somax import NewtonCG
 from utils import load_iris, load_california, MLPRegressorMini, MLPClassifierMini
 
 
