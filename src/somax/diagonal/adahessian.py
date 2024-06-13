@@ -11,14 +11,9 @@ import dataclasses
 from functools import partial
 
 import jax
-import jax.lax as lax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
-from jax.scipy.sparse.linalg import cg
-from optax import sigmoid_binary_cross_entropy
-from jaxopt.tree_util import tree_add_scalar_mul, tree_scalar_mul
 from jaxopt._src import base
-from jaxopt._src import loop
 
 
 class AdaHessianState(NamedTuple):
@@ -27,7 +22,7 @@ class AdaHessianState(NamedTuple):
     stepsize: float
     velocity_m: Any
     velocity_v_tree: Any
-    hutchinson_rng: Any
+    hess_approx_rng: Any
 
 
 @dataclasses.dataclass(eq=False)
@@ -48,6 +43,8 @@ class AdaHessian(base.StochasticSolver):
     # Hessian parameters
     hessian_power: float = 1.0  # the power of the hessian approximation, i.e. H^{-hessian_power}
     eps: float = 1e-8  # term added to the denominator to improve numerical stability
+
+    hess_approx_seed: int = 1337
 
     pre_update: Optional[Callable] = None
 
@@ -85,7 +82,7 @@ class AdaHessian(base.StochasticSolver):
         """
         # ------- Step 1 -------
         # compute the gradient and the Diagonal Hessian using Hutchinson's method
-        next_rng_key, rng_key = jax.random.split(state.hutchinson_rng)
+        next_rng_key, rng_key = jax.random.split(state.hess_approx_rng)
         params_flat, pack_fn = ravel_pytree(params)
         p_shape = params_flat.shape
         grads_tree, diag_hess_tree = self.grad_and_hess(params, rng_key, p_shape, pack_fn, *args, **kwargs)
@@ -130,7 +127,7 @@ class AdaHessian(base.StochasticSolver):
             stepsize=state.stepsize,
             velocity_m=velocity_m,
             velocity_v_tree=velocity_v_tree,
-            hutchinson_rng=next_rng_key,
+            hess_approx_rng=next_rng_key,
         )
 
         return base.OptStep(params=next_params, state=next_state)
@@ -148,7 +145,7 @@ class AdaHessian(base.StochasticSolver):
             stepsize=self.learning_rate,
             velocity_m=velocity_m,
             velocity_v_tree=velocity_v_tree,
-            hutchinson_rng=jax.random.PRNGKey(1337),
+            hess_approx_rng=jax.random.PRNGKey(self.hess_approx_seed),
         )
 
     def optimality_fun(self, params, *args, **kwargs):
