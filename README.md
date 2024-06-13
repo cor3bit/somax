@@ -1,5 +1,9 @@
 <h1 align='center'>Somax</h1>
 
+<p align='center'>
+  <img src="assets/somax_logo_mini.png" alt="logo" width="200px"/>
+</p>
+
 Somax is a library of Second-Order Methods for stochastic optimization
 written in [JAX](https://github.com/google/jax).
 Somax is based on the [JAXopt](https://github.com/google/jaxopt) StochasticSolver API,
@@ -30,6 +34,11 @@ Future releases:
 
 ⚠️ Since JAXopt is currently being merged into Optax,
 Somax at some point will switch to the Optax API as well.
+
+
+*The catfish in the logo is a nod to "сом", 
+the Belarusian word for "catfish", also pronounced as "som".
+
 
 ## Installation
 
