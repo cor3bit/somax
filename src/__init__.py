@@ -1,6 +1,7 @@
 # Diagonal Scaling
 from src.somax.diagonal.adahessian import AdaHessian
-from src.somax.diagonal.sophia import Sophia
+from src.somax.diagonal.sophia_g import SophiaG
+from src.somax.diagonal.sophia_h import SophiaH
 
 # Hessian Free Optimization
 from src.somax.hf.newton_cg import NewtonCG
