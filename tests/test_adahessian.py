@@ -10,10 +10,6 @@ from somax import AdaHessian
 from utils import load_california, load_iris, MLPRegressorMini, MLPClassifierMini
 
 
-def flatten_2d_jacobian(jac_tree):
-    return jax.vmap(lambda _: ravel_pytree(_)[0], in_axes=(0,))(jac_tree)
-
-
 # @pytest.mark.skip(reason="Disable test for debugging purposes")
 def test_adahessian_mse():
     @jax.jit

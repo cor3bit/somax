@@ -5,6 +5,16 @@ from sklearn.preprocessing import StandardScaler
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
+from jax.flatten_util import ravel_pytree
+
+
+def flatten_2d_jacobian(jac_tree):
+    return jax.vmap(lambda _: ravel_pytree(_)[0], in_axes=(0,))(jac_tree)
+
+
+def flatten_3d_jacobian(jac_tree):
+    flattened_jacobians = jax.vmap(flatten_2d_jacobian)(jac_tree)
+    return flattened_jacobians.reshape(-1, flattened_jacobians.shape[-1])
 
 
 def load_california():
