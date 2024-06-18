@@ -19,7 +19,7 @@ Currently supported methods:
 - Hessian-free Optimization:
     - [Newton-CG](https://epubs.siam.org/doi/10.1137/10079923X);
 - Quasi-Newton:
-    - [Stochastic quasi-Newton with Line Search (SQN)](https://www.sciencedirect.com/science/article/pii/S0005109821000236);
+    - [Stochastic Quasi-Newton Framework (SQN)](https://arxiv.org/abs/1606.04838);
 - Gauss-Newton:
     - [Exact Gauss-Newton (EGN)](https://arxiv.org/abs/2405.14402);
     - [Stochastic Gauss-Newton (SGN)](https://arxiv.org/abs/2006.02409);
@@ -46,7 +46,7 @@ the Belarusian word for "catfish", also pronounced as "som".
 pip install python-somax
 ```
 
-Requires [JAXopt](https://github.com/patrick-kidger/equinox) 0.8.2+.
+Requires [JAXopt](https://github.com/google/jaxopt) 0.8.2+.
 
 ## Quick example
 
@@ -91,14 +91,16 @@ Marquardt), stochastic first-order methods PolyakSGD, ArmijoSGD.
 
 **Awesome Projects**  
 [Awesome JAX](https://github.com/n2cholas/awesome-jax): a longer list of various JAX projects.  
-[Awesome SOM for ML](https://github.com/cor3bit/awesome-som4ml): a list
+[Awesome SOMs](https://github.com/cor3bit/awesome-soms): a list
 of resources for second-order optimization methods in machine learning.
 
 ## Acknowledgements
 
-Some of the implementation ideas are inspired by the following repositories:
+Some of the implementation ideas are based on the following repositories:
 
-- Line Search in JAXopt: https://github.com/google/jaxopt/blob/main/jaxopt/_src/armijo_sgd.py
+- Line Search in JAXopt: https://github.com/google/jaxopt/blob/main/jaxopt/_src/armijo_sgd.py#L48
+
+- L-BFGS Inverse Hessian-Gradient product in JAXopt: https://github.com/google/jaxopt/blob/main/jaxopt/_src/lbfgs.py#L44
 
 - AdaHessian (official implementation): https://github.com/amirgholami/adahessian
 
