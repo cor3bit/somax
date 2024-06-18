@@ -7,11 +7,12 @@ def read(fname):
 
 
 setuptools.setup(
-    name='somax',
+    name='python-somax',
     version='0.0.1',
     author='Nick Korbit',
     description='SOMAX: Second-Order Methods for Machine Learning in JAX',
     long_description=read('README.md'),
+    long_description_content_type="text/markdown",
     classifiers=[
         'Development Status :: 3 - Alpha',
         'Intended Audience :: Developers',
@@ -23,10 +24,14 @@ setuptools.setup(
         'Operating System :: OS Independent',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
-    packages=setuptools.find_packages(exclude=[
-        'examples',
-        'tests',
-    ]),
+    package_dir={'': 'src'},
+    packages=setuptools.find_packages(
+        where='src',
+        exclude=[
+            'examples',
+            'tests',
+        ],
+    ),
     platforms='any',
     # python_requires='>=3.10',
     install_requires=[
