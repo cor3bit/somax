@@ -22,6 +22,7 @@ Currently supported methods:
     - [Stochastic Quasi-Newton Framework (SQN)](https://arxiv.org/abs/1606.04838);
 - Gauss-Newton:
     - [Exact Gauss-Newton (EGN)](https://arxiv.org/abs/2405.14402);
+    - [Incremental Gauss-Newton Descent (IGND)](https://arxiv.org/abs/2408.05560);
     - [Stochastic Gauss-Newton (SGN)](https://arxiv.org/abs/2006.02409);
 - Natural Gradient:
     - [Natural Gradient with Sherman-Morrison-Woodbury formula (SWM-NG)](https://arxiv.org/abs/1906.02353).

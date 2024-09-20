@@ -11,6 +11,7 @@ from somax.qn.sqn import SQN
 
 # Gauss-Newton Methods
 from somax.gn.egn import EGN
+from somax.gn.ignd import IGND
 from somax.gn.sgn import SGN
 
 # Natural Gradient Methods
