@@ -1,92 +1,166 @@
-<h1 align='center'>Somax</h1>
+<h1 align="center">Somax</h1>
 
-<p align='center'>
-  <img src="assets/somax_logo_mini.png" alt="logo" width="250px"/>
+<p align="center">
+  <img src="assets/somax_logo_mini.png" alt="Somax logo" width="250px"/>
 </p>
 
-Somax is a library of Second-Order Methods for stochastic optimization
-written in [JAX](https://github.com/google/jax).
-Somax is based on the [JAXopt](https://github.com/google/jaxopt) StochasticSolver API,
-and can be used as a drop-in
-replacement for JAXopt as well as
-[Optax](https://github.com/google-deepmind/optax) solvers.
+<p align="center">
+  Composable Second-Order Optimization for JAX and Optax.
+</p>
 
-Currently supported methods:
+<p align="center">
+  A small research-engineering library for curvature-aware training:
+  modular, matrix-free, and explicit about the moving parts.
+</p>
 
-- Diagonal Scaling:
-    - [AdaHessian](https://ojs.aaai.org/index.php/AAAI/article/view/17275);
-    - [Sophia](https://arxiv.org/abs/2305.14342);
-- Hessian-free Optimization:
-    - [Newton-CG](https://epubs.siam.org/doi/10.1137/10079923X);
-- Quasi-Newton:
-    - [Stochastic Quasi-Newton Framework (SQN)](https://arxiv.org/abs/1606.04838);
-- Gauss-Newton:
-    - [Exact Gauss-Newton (EGN)](https://arxiv.org/abs/2405.14402);
-    - [Incremental Gauss-Newton Descent (IGND)](https://arxiv.org/abs/2408.05560);
-    - [Stochastic Gauss-Newton (SGN)](https://arxiv.org/abs/2006.02409);
-- Natural Gradient:
-    - [Natural Gradient with Sherman-Morrison-Woodbury formula (SWM-NG)](https://arxiv.org/abs/1906.02353).
+---
 
-Future releases:
+Somax is a JAX-native library for building and running second-order optimization methods from explicit components.
 
-- Add support for separate "gradient batches"
-  and "curvature batches" for all solvers;
-- Add support for Optax rate schedules.
+Rather than treating an optimizer as a monolithic object, Somax factors a step into swappable pieces:
+- curvature operator
+- solver
+- damping policy
+- optional preconditioner
+- update transform
+- optional telemetry and control signals
 
-⚠️ Since JAXopt is currently being merged into Optax,
-Somax at some point will switch to the Optax API as well.
+That decomposition is the point.
+
+Somax is built for users who want a clean second-order stack in JAX without hiding the execution model. 
+It aims to make curvature-aware training easier to inspect, compare, and extend.
 
 
-*The catfish in the logo is a nod to "сом", 
-the Belarusian word for "catfish", also pronounced as "som".
+> The catfish in the logo is a small nod to "som", the Belarusian word for catfish. A quiet bottom-dweller, but not a first-order creature.
+
+
+
+
+## What Somax does
+
+Somax treats curvature-aware optimization as a **planned step pipeline**.
+
+A method is assembled once, its execution path is fixed, and the resulting step can be JIT-compiled. 
+In a typical step, Somax:
+1. builds the step-local linearization
+2. constructs the required curvature actions
+3. solves the local second-order subproblem
+4. applies the chosen update transform
+5. returns updated state and optional step information
+
+This structure makes choices that are usually hidden inside optimizer-specific code explicit:
+- which curvature approximation is used
+- whether solving happens in diagonal, parameter, or row space
+- how damping is controlled
+- how diagonal or spectral statistics are refreshed
+- which first-order machinery is applied after the direction is computed
+
+
+
 
 
 ## Installation
 
+Install from source:
+
 ```bash
-pip install python-somax
-```
+git clone https://github.com/cor3bit/somax.git
+cd somax
+pip install -e .
+````
 
-Requires [JAXopt](https://github.com/google/jaxopt) 0.8.2+.
+JAX installation is backend-specific. 
+Install the appropriate JAX build for your CPU, GPU, or TPU environment before using Somax.
 
-## Quick example
 
-```py
-from somax import EGN
 
-# initialize the solver
-solver = EGN(
-    predict_fun=model.apply,
-    loss_type='mse',
-    learning_rate=0.1,
-    regularizer=1.0,
+
+
+
+## Minimal example
+
+```python
+import jax
+import jax.numpy as jnp
+import somax
+
+
+def predict_fn(params, x):
+    h = jnp.tanh(x @ params["W1"] + params["b1"])
+    return h @ params["W2"] + params["b2"]
+
+
+key = jax.random.PRNGKey(0)
+
+params = {
+    "W1": jax.random.normal(key, (16, 32)),
+    "b1": jnp.zeros((32,)),
+    "W2": jax.random.normal(key, (32, 10)),
+    "b2": jnp.zeros((10,)),
+}
+
+batch = {
+    "x": jax.random.normal(key, (64, 16)),
+    "y": jax.random.randint(key, (64,), 0, 10),
+}
+
+method = somax.sgn_ce(
+    predict_fn=predict_fn,
+    lam0=1e-2,
+    tol=1e-4,
+    maxiter=20,
+    learning_rate=1e-1,
 )
 
-# initialize the solver state
-opt_state = solver.init_state(params)
+state = method.init(params)
 
-# run the optimization loop
-for i in range(10):
-    params, opt_state = solver.update(params, opt_state, batch_x, batch_y)
+@jax.jit
+def train_step(params, state, rng):
+    params, state, info = method.step(params, batch, state, rng)
+    return params, state, info
+
+for step in range(10):
+    params, state, info = train_step(params, state, jax.random.fold_in(key, step))
 ```
 
-See more in the [examples](examples) folder.
 
-## Citation
 
-```bibtex
-@misc{korbit2024somax,
-  author = {Nick Korbit},
-  title = {{SOMAX}: a library of second-order methods for stochastic optimization written in {JAX}},
-  year = {2024},
-  url = {https://github.com/cor3bit/somax},
-}
+
+
+## Architecture
+
+A simplified view of the stack:
+
+```text
+preset / assemble
+    ->
+planner
+    ->
+executor
+    ->
+{curvature, solver, damping, preconditioner, update transform}
 ```
 
-## See also
+Key module families include:
 
-**Optimization with JAX**  
-[Optax](https://github.com/google-deepmind/optax): first-order gradient (SGD, Adam, ...) optimisers.  
+* `somax.curvature`
+* `somax.solvers`
+* `somax.damping`
+* `somax.preconditioners`
+* `somax.methods`
+
+The central design choice is to separate **assembly and planning** from **step execution**. 
+This keeps the public API compact while preserving explicit control over curvature, solving, damping, and telemetry.
+
+
+
+
+
+
+## Related projects
+
+**Optimization in JAX**  
+[Optax](https://github.com/google-deepmind/optax): first-order gradient (e.g., SGD, Adam) optimisers.  
 [JAXopt](https://github.com/google/jaxopt): deterministic second-order methods (e.g., Gauss-Newton, Levenberg
 Marquardt), stochastic first-order methods PolyakSGD, ArmijoSGD.
 
@@ -95,19 +169,9 @@ Marquardt), stochastic first-order methods PolyakSGD, ArmijoSGD.
 [Awesome SOMs](https://github.com/cor3bit/awesome-soms): a list
 of resources for second-order optimization methods in machine learning.
 
-## Acknowledgements
 
-Some of the implementation ideas are based on the following repositories:
 
-- Line Search in JAXopt: https://github.com/google/jaxopt/blob/main/jaxopt/_src/armijo_sgd.py#L48
 
-- L-BFGS Inverse Hessian-Gradient product in JAXopt: https://github.com/google/jaxopt/blob/main/jaxopt/_src/lbfgs.py#L44
+## License
 
-- AdaHessian (official implementation): https://github.com/amirgholami/adahessian
-
-- AdaHessian (Nestor Demeure's implementation): https://github.com/nestordemeure/AdaHessianJax
-
-- Sophia (official implementation): https://github.com/Liuhong99/Sophia
-
-- Sophia (levanter implementation): https://github.com/stanford-crfm/levanter/blob/main/src/levanter/optim/sophia.py
-
+Apache-2.0
