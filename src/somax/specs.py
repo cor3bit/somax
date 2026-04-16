@@ -143,9 +143,9 @@ def build_solver(spec: SolverSpec, precond: PreconditionerPolicy) -> Any:
         return RowCholesky(**kw)
 
     if k in ("direct", "solve"):
-        from .solvers.direct import DirectSolve
+        from .solvers.direct import DirectSPD
 
-        return DirectSolve(**kw)
+        return DirectSPD()
 
     if k in ("identity", "diag", "none"):
         from .solvers.identity import IdentitySolve

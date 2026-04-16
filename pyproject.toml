@@ -3,8 +3,8 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "somax"
-version = "1.0.0"
+name = "python-somax"
+version = "1.0.1"
 description = "Composable Second-Order Optimization for JAX and Optax."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,6 @@ dependencies = [
     "jax>=0.4.20",
     "optax>=0.1.7",
     "flax>=0.7.5",
-    "chex>=0.1.8",
     "numpy>=1.23",
 ]
 keywords = [
@@ -32,7 +31,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -44,6 +42,9 @@ classifiers = [
 Homepage = "https://github.com/cor3bit/somax"
 Repository = "https://github.com/cor3bit/somax"
 Issues = "https://github.com/cor3bit/somax/issues"
+Releases = "https://github.com/cor3bit/somax/releases"
+#Documentation = "https://github.com/cor3bit/somax/tree/main/docs"
+Paper = "https://arxiv.org/abs/2603.25976"
 
 [project.optional-dependencies]
 dev = [
@@ -54,11 +55,11 @@ dev = [
     "ruff>=0.5",
     "pyright>=1.1",
     "pre-commit>=3",
+    "chex>=0.1.8",
 ]
 docs = [
     "mkdocs>=1.5",
     "mkdocs-material>=9",
-    "mkdocstrings[python]>=0.24",
 ]
 
 [tool.setuptools.packages.find]

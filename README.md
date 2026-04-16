@@ -31,53 +31,49 @@ Somax is built for users who want a clean second-order stack in JAX without hidi
 It aims to make curvature-aware training easier to inspect, compare, and extend.
 
 
-> The catfish in the logo is a small nod to "som", the Belarusian word for catfish. A quiet bottom-dweller, but not a first-order creature.
+> The catfish in the logo is a small nod to *som*, the Belarusian word for catfish. 
+> A quiet bottom-dweller, but not a first-order creature.
 
 
 
+## Why Somax
 
-## What Somax does
-
-Somax treats curvature-aware optimization as a **planned step pipeline**.
-
-A method is assembled once, its execution path is fixed, and the resulting step can be JIT-compiled. 
-In a typical step, Somax:
-1. builds the step-local linearization
-2. constructs the required curvature actions
-3. solves the local second-order subproblem
-4. applies the chosen update transform
-5. returns updated state and optional step information
-
-This structure makes choices that are usually hidden inside optimizer-specific code explicit:
-- which curvature approximation is used
-- whether solving happens in diagonal, parameter, or row space
-- how damping is controlled
-- how diagonal or spectral statistics are refreshed
-- which first-order machinery is applied after the direction is computed
-
+- **Composable**: build methods from curvature, solver, damping, preconditioner, and update components.
+- **Optax-native**: computed directions are fed through Optax-style update transforms.
+- **Planned execution**: a method is assembled once, planned once, and then executed as a stable step pipeline.
+- **JAX-first**: intended for `jit`-compiled training loops and explicit control over execution.
+- **Multiple solve lanes**: diagonal, parameter-space, and row-space paths are first-class parts of the stack.
+- **Research-friendly**: easy to inspect, compare, ablate, and extend.
 
 
 
 
 ## Installation
 
-Install from source:
+Install JAX for your backend first:
+
+- JAX installation guide: https://docs.jax.dev/en/latest/installation.html
+
+Then install Somax:
+
+```bash
+pip install python-somax
+```
+
+For local development:
 
 ```bash
 git clone https://github.com/cor3bit/somax.git
 cd somax
-pip install -e .
-````
+pip install -e ".[dev]"
+```
 
-JAX installation is backend-specific. 
-Install the appropriate JAX build for your CPU, GPU, or TPU environment before using Somax.
-
-
+Optional:
+- install `lineax` only if you want to use CG backends with `backend="lineax"`.
 
 
 
-
-## Minimal example
+## Quickstart
 
 ```python
 import jax
@@ -90,18 +86,19 @@ def predict_fn(params, x):
     return h @ params["W2"] + params["b2"]
 
 
-key = jax.random.PRNGKey(0)
+rng = jax.random.PRNGKey(0)
+k1, k2, k3, k4 = jax.random.split(rng, 4)
 
 params = {
-    "W1": jax.random.normal(key, (16, 32)),
+    "W1": 0.1 * jax.random.normal(k1, (16, 32)),
     "b1": jnp.zeros((32,)),
-    "W2": jax.random.normal(key, (32, 10)),
+    "W2": 0.1 * jax.random.normal(k2, (32, 10)),
     "b2": jnp.zeros((10,)),
 }
 
 batch = {
-    "x": jax.random.normal(key, (64, 16)),
-    "y": jax.random.randint(key, (64,), 0, 10),
+    "x": jax.random.normal(k3, (64, 16)),
+    "y": jax.random.randint(k4, (64,), 0, 10),
 }
 
 method = somax.sgn_ce(
@@ -120,41 +117,29 @@ def train_step(params, state, rng):
     return params, state, info
 
 for step in range(10):
-    params, state, info = train_step(params, state, jax.random.fold_in(key, step))
+    params, state, info = train_step(params, state, jax.random.fold_in(rng, step))
 ```
 
 
 
 
+## Citation
 
-## Architecture
+If Somax is useful in your academic work, please cite:
 
-A simplified view of the stack:
+**Second-Order, First-Class: A Composable Stack for Curvature-Aware Training**  
+Mikalai Korbit and Mario Zanon  
+https://arxiv.org/abs/2603.25976
 
-```text
-preset / assemble
-    ->
-planner
-    ->
-executor
-    ->
-{curvature, solver, damping, preconditioner, update transform}
+
+```bibtex
+@article{korbit2026second,
+  title={Second-Order, First-Class: A Composable Stack for Curvature-Aware Training},
+  author={Korbit, Mikalai and Zanon, Mario},
+  journal={arXiv preprint arXiv:2603.25976},
+  year={2026}
+}
 ```
-
-Key module families include:
-
-* `somax.curvature`
-* `somax.solvers`
-* `somax.damping`
-* `somax.preconditioners`
-* `somax.methods`
-
-The central design choice is to separate **assembly and planning** from **step execution**. 
-This keeps the public API compact while preserving explicit control over curvature, solving, damping, and telemetry.
-
-
-
-
 
 
 ## Related projects

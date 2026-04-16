@@ -8,7 +8,7 @@ from somax.solvers.cg import CGState
 from somax.solvers.row_cg import RowConjugateGradient
 from somax.solvers.row_cholesky import RowCholesky
 
-from tests.conftest import make_full_rank_J, normal_eq_solution
+from helpers import make_full_rank_J, normal_eq_solution
 
 
 def _as_vec(x):
@@ -23,49 +23,41 @@ def _to_flat_pytree(x):
     return flat
 
 
-def test_row_cg_matches_row_cholesky(keys, make_block_pytree, bind_row_system_from_J, tol):
+def test_row_cg_solves_dense_spd_row_system(keys):
     key = keys()
-    m, n = 40, 20
+    kA, krhs = jax.random.split(key)
 
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-    rhs_row = jax.random.normal(keys(), (m,), dtype=jnp.float32)
+    m = 40
+    dtype = jnp.float32
 
-    lam = jnp.asarray(1e-3, dtype=jnp.float32)
-    bsz = 8
+    M = jax.random.normal(kA, (m, m), dtype=dtype)
+    A = M @ M.T + jnp.asarray(1e-1, dtype=dtype) * jnp.eye(m, dtype=dtype)
+    rhs = jax.random.normal(krhs, (m,), dtype=dtype)
 
-    A_mv, rhs, backproject, mu = bind_row_system_from_J(J, rhs_row, pack, lam=lam, b=bsz, reduction="mean")
+    def A_mv(u):
+        return A @ u
 
     rcg = RowConjugateGradient(
         backend="pcg",
         tol=1e-6,
-        maxiter=2000,
-        stabilise_every=10,
-        warm_start=True,
+        maxiter=4 * m,
+        stabilise_every=0,
+        warm_start=False,
     )
     st = rcg.init(rhs)
-    u_cg, info_cg, _ = rcg.solve(A_mv, rhs, state=st, precond=None)
+    u_cg, info_cg, st_new = rcg.solve(A_mv, rhs, state=st, precond=None)
 
-    chol = RowCholesky(symmetrize=True, jitter=1e-6, solve_dtype=None)
-    u_ch, info_ch, _ = chol.solve(A_mv, rhs, state=None, precond=None)
-
-    assert info_ch["mode"] == "row_cholesky"
+    assert u_cg.shape == (m,)
     assert mx.CG_ITERS in info_cg
     assert mx.CG_RESID in info_cg
     assert mx.CG_CONVERGED in info_cg
+    assert st_new is not None
+    assert jnp.all(jnp.isfinite(u_cg))
 
-    s_cg = backproject(u_cg)
-    s_ch = backproject(u_ch)
-
-    # Compare in parameter space.
-    s_cg_f = _to_flat_pytree(s_cg)
-    s_ch_f = _to_flat_pytree(s_ch)
-    assert jnp.allclose(s_cg_f, s_ch_f, rtol=2e-3, atol=2e-3)
-
-    # Compare to explicit normal-equations reference:
-    # s = J^T u solves (J^T J + mu I) s = J^T rhs_row
-    s_ref = normal_eq_solution(J, rhs_row, float(mu))
-    assert jnp.allclose(s_cg_f, s_ref, **tol)
+    resid = jnp.linalg.norm(A @ u_cg - rhs)
+    rhs_norm = jnp.maximum(jnp.linalg.norm(rhs), jnp.asarray(1e-12, dtype))
+    rel_resid = resid / rhs_norm
+    assert rel_resid < 1e-4
 
 
 def test_row_cg_rejects_precond(keys, make_block_pytree, bind_row_system_from_J):

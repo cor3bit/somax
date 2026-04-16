@@ -4,9 +4,16 @@ from .presets import make, list_methods, describe
 # Import methods once so @register runs and explicit methods exist.
 from . import methods as _methods  # noqa: F401
 
-from importlib.metadata import version as _version
+from importlib.metadata import PackageNotFoundError, version as _version
 
-__version__ = _version("somax")
+for _dist_name in ("python-somax", "somax"):
+    try:
+        __version__ = _version(_dist_name)
+        break
+    except PackageNotFoundError:
+        continue
+else:
+    __version__ = "0+unknown"
 
 # Re-export explicit methods at the top level.
 from .methods import (

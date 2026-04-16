@@ -45,7 +45,7 @@ def test_exact_hessian_grad_and_hvp_match_autodiff(key, small_shapes, mse_loss, 
     g_ref = jax.grad(lambda p: op.loss_only(p, batch))(params)
     chex.assert_trees_all_close(g, g_ref, **tol)
 
-    v = jax.tree_map(lambda a: jax.random.normal(kv, a.shape, jnp.float32), params)
+    v = jax.tree_util.tree_map(lambda a: jax.random.normal(kv, a.shape, jnp.float32), params)
     Hv = op.matvec(params, state, v)
 
     # Reference HVP via jax.jvp of grad
