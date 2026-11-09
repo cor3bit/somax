@@ -1,7 +1,7 @@
 <h1 align="center">Somax</h1>
 
 <p align="center">
-  <img src="assets/somax_logo_mini.png" alt="Somax logo" width="250" />
+  <img src="assets/somax_logo_mini.png" alt="Somax logo" width="350" />
 </p>
 
 <p align="center">
