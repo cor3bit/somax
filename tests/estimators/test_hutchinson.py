@@ -112,7 +112,7 @@ def test_hutchinson_stateless_across_param_structures(keys, dtype):
 
     p1 = {"w": jax.random.normal(keys(), (17,), dtype=dtype)}
     d1 = _diag_tree_like_params(p1, keys())
-    mv1 = lambda v: utils.tree_scale(v, 0.0) if False else jax.tree_util.tree_map(lambda d, x: d * x, d1, v)
+    mv1 = lambda v: jax.tree_util.tree_map(lambda d, x: d * x, d1, v)
 
     p2 = {"w": jax.random.normal(keys(), (4, 3), dtype=dtype), "b": jax.random.normal(keys(), (3,), dtype=dtype)}
     d2 = _diag_tree_like_params(p2, keys())

@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.flatten_util import ravel_pytree
 
 import somax
+from somax import metrics as mx
 
 
 def test_sgn_mse_smoke(key, medium_shapes, mlp_apply, make_teacher_regression, init_mlp_regression, mse_loss):
@@ -97,3 +99,66 @@ def test_sgn_ce_stability_saturated_logits(key, mlp_logits):
     flat, _ = ravel_pytree(p1)
     assert jnp.isfinite(jnp.linalg.norm(flat))
     assert int(st1.step) == 1
+
+
+def _small_linear_logits(params, x):
+    return x @ params["w"] + params["b"]
+
+
+def test_sgn_ce_gnb_diagonal_preconditioner_preserves_converged_solution(key):
+    params0 = {
+        "w": jnp.asarray(
+            [[0.2, -0.1, 0.05], [-0.3, 0.15, 0.25]],
+            jnp.float32,
+        ),
+        "b": jnp.asarray([0.05, -0.02, 0.01], jnp.float32),
+    }
+    batch = {
+        "x": jnp.asarray(
+            [
+                [1.0, -0.5],
+                [0.2, 0.7],
+                [-0.8, 0.3],
+                [0.4, -1.0],
+                [0.7, 0.1],
+                [-0.2, -0.4],
+            ],
+            jnp.float32,
+        ),
+        "y": jnp.asarray([0, 1, 2, 0, 1, 2], jnp.int32),
+    }
+
+    common = dict(
+        predict_fn=_small_linear_logits,
+        lam0=0.7,
+        tol=1e-7,
+        maxiter=20,
+        warm_start=False,
+        learning_rate=1.0,
+        record_cg_stats=True,
+    )
+    reference = somax.make("sgn_ce", **common)
+    preconditioned = somax.make(
+        "sgn_ce",
+        estimator="gnb",
+        estimator_kwargs={"n_samples": 8},
+        precond="diag_direct",
+        precond_kwargs={"eps": 1e-6, "add_lambda": True},
+        **common,
+    )
+
+    def run(method):
+        state0 = method.init(params0)
+        return jax.jit(method.step)(params0, batch, state0, key)
+
+    params_ref, _, info_ref = run(reference)
+    params_pre, _, info_pre = run(preconditioned)
+
+    ref_flat, _ = ravel_pytree(params_ref)
+    pre_flat, _ = ravel_pytree(params_pre)
+    np.testing.assert_allclose(pre_flat, ref_flat, rtol=2e-6, atol=2e-7)
+
+    for info in (info_ref, info_pre):
+        assert bool(info[mx.CG_CONVERGED])
+        assert float(info[mx.CG_RESID]) < 1e-6
+        assert int(info[mx.CG_ITERS]) <= int(info[mx.CG_MAXITER])

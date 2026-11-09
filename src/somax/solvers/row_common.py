@@ -18,8 +18,8 @@ that maps row-space u to a parameter-space direction:
 
 Convention:
 - This binder constructs backproject from row_op.vjp only.
-- Any extra scaling (e.g., 1/B for mean reduction) and the choice of sign
-  (whether d is a descent direction or a solve result) is handled outside
+- The choice of sign (whether d is a descent direction or a solve result)
+  is handled outside
   this module (executor / optimizer).
 """
 
@@ -56,16 +56,19 @@ def bind_row_system(
     Returns:
       A_mv: u -> (J J^T + mu I) u
       rhs: row_op.rhs
-      backproject: u -> J^T u   (unscaled; old convention)
+      backproject: u -> J^T u
       mu: row damping used
     """
     b = int(row_op.b)
     mu = mu_from_lambda(lam, b=b, reduction=reduction)
+    gram_mv = getattr(row_op, "gram_mv", None)
 
     def A_mv(u: Array) -> Array:
-        # (J J^T) u = J (J^T u)
-        p = row_op.vjp(u)  # Updates (param pytree)
-        ju = row_op.jvp(p)  # (m,) row vector
+        if gram_mv is not None:
+            ju = gram_mv(u)
+        else:
+            p = row_op.vjp(u)  # Updates (param pytree)
+            ju = row_op.jvp(p)  # (m,) row vector
         return ju + mu * u
 
     return A_mv, row_op.rhs, row_op.vjp, mu

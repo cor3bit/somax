@@ -33,7 +33,6 @@ def adahessian(
         direction_momentum: float | None = None,
         nesterov: bool = False,
 
-        # catch all
         **kwargs: dict,
 ):
     curv = CurvatureSpec(

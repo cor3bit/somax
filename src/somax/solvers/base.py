@@ -10,7 +10,7 @@ Lane selection convention (static, compile-time):
 
 Row-space solvers solve for the row variable u and return u (an Array). The
 executor is responsible for mapping u -> parameter-space direction s via the
-curvature RowOperator.backproject callable.
+curvature RowOperator.vjp callable (via the row-system binder).
 """
 
 from typing import Any, Dict, Protocol, Tuple

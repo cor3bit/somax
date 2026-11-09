@@ -6,14 +6,31 @@ from ..estimators.base import EstimatorPolicy
 
 
 class CurvatureOpWithEstimators:
+    """Wrap a CurvatureOperator and add estimator facade methods.
+
+    Note: Estimators must not trigger an additional linearization.
+    They only receive an MVP closure built from (params, state).
+    """
 
     def __init__(self, base: CurvatureOperator, estimator: EstimatorPolicy):
         self._base = base
         self._est = estimator
 
     # ---- delegate CurvatureOperator protocol ----
-    def init(self, params: Params, batch: Batch, *, with_grad: bool = False) -> tuple[CurvatureState, Any]:
-        return self._base.init(params, batch, with_grad=with_grad)
+    def init(
+            self,
+            params: Params,
+            batch: Batch,
+            *,
+            model_state: Any = (),
+            with_grad: bool = False,
+    ) -> tuple[CurvatureState, Any]:
+        return self._base.init(
+            params,
+            batch,
+            model_state=model_state,
+            with_grad=with_grad,
+        )
 
     def matvec(self, params: Params, state: CurvatureState, v: PyTree) -> PyTree:
         return self._base.matvec(params, state, v)
@@ -21,8 +38,16 @@ class CurvatureOpWithEstimators:
     def loss(self, params: Params, state: CurvatureState, batch: Batch) -> Scalar:
         return self._base.loss(params, state, batch)
 
-    def loss_only(self, params: Params, batch: Batch) -> Scalar:
-        return self._base.loss_only(params, batch)
+    def loss_only(
+            self,
+            params: Params,
+            batch: Batch,
+            *,
+            model_state: Any = (),
+    ) -> Scalar:
+        return self._base.loss_only(
+            params, batch, model_state=model_state
+        )
 
     def row_op(self, params: Params, state: CurvatureState, batch: Batch) -> RowOperator:
         return self._base.row_op(params, state, batch)

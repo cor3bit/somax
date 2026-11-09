@@ -4,15 +4,16 @@ from ..presets import register
 from ..assembler import assemble
 from ..optax import sophia_tx
 from ..specs import CurvatureSpec, DampingSpec, SolverSpec, PrecondSpec, EstimatorSpec, TelemetrySpec
-from ..types import PredictFn, ScalarOrSchedule
+from ..types import PredictFnLike, ScalarOrSchedule
 
 
-@register("sophia_g", desc="Sophia-G: True Hessian + Diagonal EMA Preconditioner w/ GNB Estimator.")
+@register("sophia_g", desc="Sophia-G: GGN + Diagonal EMA Preconditioner w/ GNB Estimator.")
 def sophia_g(
         *,
-        predict_fn: PredictFn,
+        predict_fn: PredictFnLike,
         x_key="x",
         y_key="y",
+        has_aux: bool = False,
         beta1: float = 0.965,
         beta2: float = 0.99,
         gamma: float = 0.05,
@@ -29,12 +30,12 @@ def sophia_g(
         clip_value: float = 1.0,
         mask=None,
 
-        # catch all
         **kwargs: dict,
 ):
     curv = CurvatureSpec(
         "ggn_ce", {
             "predict_fn": predict_fn,
+            "has_aux": has_aux,
             "x_key": x_key,
             "y_key": y_key,
             "reduction": "mean",

@@ -2,10 +2,23 @@ import jax
 import jax.numpy as jnp
 import chex
 import optax
+import pytest
 from jax.flatten_util import ravel_pytree
 
 from somax.curvature.ggn_mse import GGNMSE
 from somax import utils
+
+
+@pytest.mark.parametrize("bad_target_shape", [(1,), (3, 2)])
+def test_ggnmse_rejects_broadcasting_targets(bad_target_shape):
+    params = jnp.array([1.0, 2.0], dtype=jnp.float32)
+    batch = {"x": jnp.ones((3, 2), dtype=jnp.float32),
+             "y": jnp.zeros(bad_target_shape, dtype=jnp.float32)}
+    op = GGNMSE(predict_fn=lambda p, x: x @ p)
+    with pytest.raises(ValueError, match="shape"):
+        op.init(params, batch)
+    with pytest.raises(ValueError, match="shape"):
+        op.loss_only(params, batch)
 
 
 def test_ggnmse_loss_matches_loss_only(key, small_shapes, linear_predict, tol, mse_loss):

@@ -30,7 +30,6 @@ def sophia_h(
         clip_value: float = 1.0,
         mask=None,
 
-        # catch all
         **kwargs: dict,
 ):
     curv = CurvatureSpec(

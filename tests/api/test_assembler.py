@@ -21,7 +21,7 @@ def test_assemble_minimal_config(linear_predict):
     assert method.plan.lane == "param"
     assert mx.STEP in method.plan.metric_keys
 
-    # Defaults: damping and preconditioner are identity-ish.
+    # Defaults: zero damping and identity preconditioning.
     assert method.damping is not None
     assert method.precond is not None
 
@@ -38,8 +38,8 @@ def test_assemble_full_config(linear_predict):
     prec = PrecondSpec("diag_ema", {"beta2": 0.9})
     est = EstimatorSpec("hutchinson", {"n_probes": 3})
 
-    # Telemetry requests rho + cg stats each step; planner should merge with damping cadence.
-    tele = TelemetrySpec(record_rho=True, record_cg=True)
+    # Telemetry requests gain ratio + cg stats each step; planner should merge with damping cadence.
+    tele = TelemetrySpec(record_gain_ratio=True, record_cg=True)
 
     method = assemble(
         curvature=curv,
@@ -52,8 +52,8 @@ def test_assemble_full_config(linear_predict):
 
     # Plan invariants
     assert method.plan.lane == "param"
-    assert method.plan.req.rho_every_k == 5  # damping cadence dominates telemetry cadence
-    assert mx.RHO in method.plan.metric_keys
+    assert method.plan.req.gain_ratio_every_k == 5  # damping cadence dominates telemetry cadence
+    assert mx.GAIN_RATIO in method.plan.metric_keys
     assert mx.CG_ITERS in method.plan.metric_keys
 
     # Curvature should be wrapped when an estimator is provided.

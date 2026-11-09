@@ -13,14 +13,13 @@ import optax
 
 @pytest.fixture(scope="session", autouse=True)
 def set_jax_x64_off():
-    """Force default float32 behavior in all tests."""
-    # If user env enables x64, we disable it for this phase.
+    """Use float32 by default; individual tests may enable x64 explicitly."""
     jax.config.update("jax_enable_x64", False)
 
 
 @pytest.fixture
 def dtype():
-    """Single dtype for this phase."""
+    """Default floating-point dtype."""
     return jnp.float32
 
 

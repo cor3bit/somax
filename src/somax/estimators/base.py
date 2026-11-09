@@ -12,7 +12,8 @@ class EstimatorPolicy(Protocol):
     --------
     - Stateless-by-contract; may lazily cache param-shape info on first call.
     - All methods must be JIT-safe; RNG comes from the caller.
-    - `state` is passed through for estimators that can reuse curvature caches.
+    - `state` is passed through for estimators that can reuse curvature caches,
+      but estimators must NOT rely on large incidental caches (e.g. batch grads).
     """
 
     def diagonal(self, params: Params, state: CurvatureState, mvp: MatVec, rng: PRNGKey) -> PyTree:
@@ -35,7 +36,8 @@ class EstimatorPolicy(Protocol):
 
         Notes
         -----
-        - For SPD operators, these are lower/upper spectral bounds.
+        - For SPD operators, these estimate the extremal eigenvalues; they
+          are not certified enclosing bounds.
         - For non-SPD operators, estimators may return approximate extrema of
           a symmetrized operator; callers must interpret accordingly.
         """

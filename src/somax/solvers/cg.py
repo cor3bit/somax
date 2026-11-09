@@ -45,12 +45,11 @@ class ConjugateGradient(LinearSolver):
     def __init__(
             self,
             *,
-            maxiter: int = 50,
+            maxiter: int = 10,
             tol: float = 1e-4,
-            warm_start: bool = True,
-            stabilise_every: int = 10,
+            warm_start: bool = False,
+            stabilise_every: int = 0,
             preconditioned: bool = False,
-            assume_spd: bool = True,
             solve_dtype: Optional[jnp.dtype] = None,
             backend: str = "pcg",  # "pcg", "scipy", "lineax"
             telemetry_residual: bool = False,
@@ -60,7 +59,6 @@ class ConjugateGradient(LinearSolver):
         self._tol = float(tol)
         self._warm_start = bool(warm_start)
         self._preconditioned = bool(preconditioned)
-        self._assume_spd = bool(assume_spd)
         self._solve_dtype = solve_dtype
         self._telemetry_residual = bool(telemetry_residual)
 
@@ -71,8 +69,15 @@ class ConjugateGradient(LinearSolver):
         # pcg emits a telemetry residual metric for free, scipy and lineax do not
         self._needs_telemetry_residual = False
 
-        # based on the above flags, bind the appropriate solve() implementation to self._solve_fn
+        # Bind backend and static solver options once.
         if self._backend == "pcg":
+            if self._solve_dtype is not None:
+                raise ValueError(
+                    "ConjugateGradient(backend='pcg') requires solve_dtype=None. "
+                    "The internal pcg backend currently solves in the input dtype and "
+                    "does not implement explicit solve_dtype casting."
+                )
+
             if self._preconditioned:
                 core = _make_pcg_core(self._do_stabilise, self._stabilise_every)
             else:
@@ -102,7 +107,6 @@ class ConjugateGradient(LinearSolver):
                 tol=self._tol, maxiter=self._maxiter,
                 solve_dtype=self._solve_dtype,
                 stabilise_every=self._stabilise_every,
-                assume_spd=self._assume_spd,
                 _cache=self._lx_cache, _cache_cap=8,
             )
         else:
@@ -121,7 +125,7 @@ class ConjugateGradient(LinearSolver):
             state: Any,
             precond: Optional[PrecondFn] = None,
     ) -> Tuple[Updates, Dict[str, Any], Any]:
-        # Enforce static has_precond axis across all backends (keeps experiments honest).
+        # Enforce the configured preconditioning mode across backends.
         if self._preconditioned and precond is None:
             raise ValueError("ConjugateGradient(preconditioned=True) requires precond != None.")
         if (not self._preconditioned) and precond is not None:
@@ -129,6 +133,10 @@ class ConjugateGradient(LinearSolver):
 
         x0: Optional[Updates] = None
         if self._warm_start:
+            if not isinstance(state, CGState):
+                raise ValueError(
+                    "ConjugateGradient(warm_start=True) requires CGState as solver state."
+                )
             x0 = state.last_x
 
         x, info = self._solve_fn(A_mv, rhs, precond, x0)
@@ -159,10 +167,6 @@ def _make_pcg_core(do_stabilise: bool, stabilise_every: int):
     return lambda A_mv, b, precond, x0, tol, maxiter: _pcg_core_stab(A_mv, b, precond, x0, tol, maxiter, se)
 
 
-# -----------------------
-# CG (no preconditioner)
-# -----------------------
-
 def _cg_init(A_mv: MatVec, b: Updates, x0: Optional[Updates]) -> Tuple[Updates, Updates]:
     if x0 is None:
         x = tree_zeros_like(b)
@@ -171,6 +175,11 @@ def _cg_init(A_mv: MatVec, b: Updates, x0: Optional[Updates]) -> Tuple[Updates, 
         x = x0
         r = tree_sub(b, A_mv(x))
     return x, r
+
+
+# -----------------------
+# CG (no preconditioner)
+# -----------------------
 
 
 def _cg_core_nostab(
@@ -182,8 +191,7 @@ def _cg_core_nostab(
         maxiter: int,
 ) -> Tuple[Updates, Dict[str, Any]]:
     leaf_dtype = jnp.result_type(*jax.tree_util.tree_leaves(b))
-    finfo = jnp.finfo(leaf_dtype)
-    tiny, eps = finfo.tiny, finfo.eps
+    tiny = jnp.finfo(leaf_dtype).tiny
 
     b2 = jnp.maximum(tree_norm2(b), tiny)
     tol2 = (tol * tol) * b2
@@ -203,13 +211,16 @@ def _cg_core_nostab(
         x, r, p, rTr, k = c
         Ap = A_mv(p)
         pAp = tree_vdot(p, Ap)
-        alpha = rTr / jnp.maximum(pAp, eps)
+
+        alpha = rTr / pAp
 
         x_new = tree_add_scaled(x, alpha, p)
         r_new = tree_add_scaled(r, -alpha, Ap)
 
         rTr_new = tree_vdot(r_new, r_new)
-        beta = rTr_new / jnp.maximum(rTr, eps)
+
+        beta = rTr_new / rTr
+
         p_new = tree_add_scaled(r_new, beta, p)
 
         return (x_new, r_new, p_new, rTr_new, k + 1)
@@ -234,8 +245,7 @@ def _cg_core_stab(
         se: jax.Array,
 ) -> Tuple[Updates, Dict[str, Any]]:
     leaf_dtype = jnp.result_type(*jax.tree_util.tree_leaves(b))
-    finfo = jnp.finfo(leaf_dtype)
-    tiny, eps = finfo.tiny, finfo.eps
+    tiny = jnp.finfo(leaf_dtype).tiny
 
     b2 = jnp.maximum(tree_norm2(b), tiny)
     tol2 = (tol * tol) * b2
@@ -256,7 +266,8 @@ def _cg_core_stab(
         x, r, p, rTr, k, t = c
         Ap = A_mv(p)
         pAp = tree_vdot(p, Ap)
-        alpha = rTr / jnp.maximum(pAp, eps)
+
+        alpha = rTr / pAp
 
         x_new = tree_add_scaled(x, alpha, p)
         r_tmp = tree_add_scaled(r, -alpha, Ap)
@@ -274,7 +285,9 @@ def _cg_core_stab(
         def _cheap(_):
             r_new = r_tmp
             rTr_new = tree_vdot(r_new, r_new)
-            beta = rTr_new / jnp.maximum(rTr, eps)
+
+            beta = rTr_new / rTr
+
             p_new = tree_add_scaled(r_new, beta, p)
             return (r_new, p_new, rTr_new)
 
@@ -308,29 +321,34 @@ def _pcg_core_nostab(
         maxiter: int,
 ) -> Tuple[Updates, Dict[str, Any]]:
     leaf_dtype = jnp.result_type(*jax.tree_util.tree_leaves(b))
-    finfo = jnp.finfo(leaf_dtype)
-    tiny, eps = finfo.tiny, finfo.eps
+    tiny = jnp.finfo(leaf_dtype).tiny
 
     b2 = jnp.maximum(tree_norm2(b), tiny)
     tol2 = (tol * tol) * b2
 
     x, r = _cg_init(A_mv, b, x0)
+
     z = precond(r)
     r2, rz = tree_dot_pair(r, z)
     p = z
 
     k0 = jnp.asarray(0, jnp.int32)
-    init = (x, r, z, p, rz, r2, k0)
+
+    # Do not carry z. It is only needed inside the current body iteration.
+    init = (x, r, p, rz, r2, k0)
 
     def cond(c):
-        _x, _r, _z, _p, _rz, r2_c, k = c
+        _x, _r, _p, _rz, r2_c, k = c
         return jnp.logical_and(r2_c > tol2, k < maxiter)
 
     def body(c):
-        x, r, z, p, rz, r2, k = c
+        x, r, p, rz, r2, k = c
+        del r2
+
         Ap = A_mv(p)
         pAp = tree_vdot(p, Ap)
-        alpha = rz / jnp.maximum(pAp, eps)
+
+        alpha = rz / pAp
 
         x_new = tree_add_scaled(x, alpha, p)
         r_new = tree_add_scaled(r, -alpha, Ap)
@@ -338,12 +356,12 @@ def _pcg_core_nostab(
         z_new = precond(r_new)
         r2_new, rz_new = tree_dot_pair(r_new, z_new)
 
-        beta = rz_new / jnp.maximum(rz, eps)
+        beta = rz_new / rz
         p_new = tree_add_scaled(z_new, beta, p)
 
-        return (x_new, r_new, z_new, p_new, rz_new, r2_new, k + 1)
+        return (x_new, r_new, p_new, rz_new, r2_new, k + 1)
 
-    x_fin, _r_fin, _z_fin, _p_fin, _rz_fin, r2_fin, k_fin = lax.while_loop(cond, body, init)
+    x_fin, _r_fin, _p_fin, _rz_fin, r2_fin, k_fin = lax.while_loop(cond, body, init)
 
     info: Dict[str, jax.Array] = {
         mx.CG_ITERS: k_fin,
@@ -364,12 +382,12 @@ def _pcg_core_stab(
         se: jax.Array,
 ) -> Tuple[Updates, Dict[str, Any]]:
     leaf_dtype = jnp.result_type(*jax.tree_util.tree_leaves(b))
-    finfo = jnp.finfo(leaf_dtype)
-    tiny, eps = finfo.tiny, finfo.eps
+    tiny = jnp.finfo(leaf_dtype).tiny
 
     b2 = jnp.maximum(tree_norm2(b), tiny)
     tol2 = (tol * tol) * b2
 
+    # Initialization
     x, r = _cg_init(A_mv, b, x0)
     z = precond(r)
     r2, rz = tree_dot_pair(r, z)
@@ -377,17 +395,21 @@ def _pcg_core_stab(
 
     k0 = jnp.asarray(0, jnp.int32)
     t0 = se
-    init = (x, r, z, p, rz, r2, k0, t0)
+
+    init = (x, r, p, rz, r2, k0, t0)
 
     def cond(c):
-        _x, _r, _z, _p, _rz, r2_c, k, _t = c
+        _x, _r, _p, _rz, r2_c, k, _t = c
         return jnp.logical_and(r2_c > tol2, k < maxiter)
 
     def body(c):
-        x, r, z, p, rz, r2, k, t = c
+        x, r, p, rz, r2, k, t = c
+        del r2
+
         Ap = A_mv(p)
         pAp = tree_vdot(p, Ap)
-        alpha = rz / jnp.maximum(pAp, eps)
+
+        alpha = rz / pAp
 
         x_new = tree_add_scaled(x, alpha, p)
         r_tmp = tree_add_scaled(r, -alpha, Ap)
@@ -401,22 +423,27 @@ def _pcg_core_stab(
             z_exact = precond(r_exact)
             r2_exact, rz_exact = tree_dot_pair(r_exact, z_exact)
             p_new = z_exact
-            return (r_exact, z_exact, p_new, rz_exact, r2_exact)
+            return (r_exact, p_new, rz_exact, r2_exact)
 
         def _cheap(_):
             r_new = r_tmp
             z_new = precond(r_new)
             r2_new, rz_new = tree_dot_pair(r_new, z_new)
-            beta = rz_new / jnp.maximum(rz, eps)
-            p_new = tree_add_scaled(z_new, beta, p)
-            return (r_new, z_new, p_new, rz_new, r2_new)
 
-        r_new, z_new, p_new, rz_new, r2_new = lax.cond(do_replace, _replace, _cheap, operand=None)
+            beta = rz_new / rz
+            p_new = tree_add_scaled(z_new, beta, p)
+            return (r_new, p_new, rz_new, r2_new)
+
+        r_new, p_new, rz_new, r2_new = lax.cond(
+            do_replace, _replace, _cheap, operand=None
+        )
         t_out = lax.select(do_replace, se, t_next)
 
-        return (x_new, r_new, z_new, p_new, rz_new, r2_new, k_next, t_out)
+        return (x_new, r_new, p_new, rz_new, r2_new, k_next, t_out)
 
-    x_fin, _r_fin, _z_fin, _p_fin, _rz_fin, r2_fin, k_fin, _t_fin = lax.while_loop(cond, body, init)
+    x_fin, _r_fin, _p_fin, _rz_fin, r2_fin, k_fin, _t_fin = lax.while_loop(
+        cond, body, init
+    )
 
     info: Dict[str, jax.Array] = {
         mx.CG_ITERS: k_fin,
@@ -457,7 +484,8 @@ def _solve_jax_scipy(
     if solve_dtype is not None:
 
         def A_s(v):
-            return A0(maybe_cast_tree(v, solve_dtype))
+            primal_tangent = jax.tree_util.tree_map(lambda leaf, ref: leaf.astype(ref.dtype), v, rhs)
+            return maybe_cast_tree(A0(primal_tangent), solve_dtype)
 
         if precond is None:
             M_s = None
@@ -465,7 +493,8 @@ def _solve_jax_scipy(
             P0 = precond
 
             def M_s(v):
-                return P0(maybe_cast_tree(v, solve_dtype))
+                primal_tangent = jax.tree_util.tree_map(lambda leaf, ref: leaf.astype(ref.dtype), v, rhs)
+                return maybe_cast_tree(P0(primal_tangent), solve_dtype)
 
         b = maybe_cast_tree(rhs, solve_dtype)
         x0_s = None if x0 is None else maybe_cast_tree(x0, solve_dtype)
@@ -497,7 +526,6 @@ def _solve_lineax(
         maxiter: int,
         solve_dtype: Optional[jnp.dtype],
         stabilise_every: int,
-        assume_spd: bool,
         _cache: "collections.OrderedDict[Any, Any]",
         _cache_cap: int,
 ) -> Tuple[Updates, Dict[str, Any]]:
@@ -508,23 +536,43 @@ def _solve_lineax(
     b_ref = rhs
 
     if solve_dtype is not None:
-        A_mv = lambda v: A0(maybe_cast_tree(v, solve_dtype))
+        def A_mv(v):
+            primal_tangent = jax.tree_util.tree_map(lambda leaf, ref: leaf.astype(ref.dtype), v, rhs)
+            return maybe_cast_tree(A0(primal_tangent), solve_dtype)
+
         b = maybe_cast_tree(rhs, solve_dtype)
         x0 = None if x0 is None else maybe_cast_tree(x0, solve_dtype)
         if precond is not None:
             P0 = precond
-            precond = lambda v: P0(maybe_cast_tree(v, solve_dtype))
+
+            def precond(v):
+                primal_tangent = jax.tree_util.tree_map(lambda leaf, ref: leaf.astype(ref.dtype), v, rhs)
+                return maybe_cast_tree(P0(primal_tangent), solve_dtype)
     else:
         b = rhs
 
-    # Cache linear operators by (A identity, precond identity, treedef, dtype, SPD tag).
+    # Cache linear operators by callable identities and the full rhs tree signature.
     treedef = jax.tree_util.tree_structure(b)
-    rhs_dtype = jnp.result_type(*jax.tree_util.tree_leaves(b))
-    key = ("lineax", id(A0), id(precond) if precond is not None else 0, treedef, rhs_dtype, assume_spd)
+
+    leaf_signature = tuple((leaf.shape, leaf.dtype) for leaf in jax.tree_util.tree_leaves(b))
+
+    input_signature = tuple(
+        (leaf.shape, leaf.dtype)
+        for leaf in jax.tree_util.tree_leaves(rhs)
+    )
+
+    key = (
+        "lineax",
+        id(A0),
+        id(precond) if precond is not None else 0,
+        treedef,
+        leaf_signature,
+        input_signature,
+    )
 
     entry = _cache.get(key)
     if entry is None:
-        tags = (lx.symmetric_tag, lx.positive_semidefinite_tag) if assume_spd else ()
+        tags = (lx.symmetric_tag, lx.positive_semidefinite_tag)
         A_op = lx.FunctionLinearOperator(A_mv, b, tags=tags)
         M_op = None if precond is None else lx.FunctionLinearOperator(precond, b, tags=(lx.positive_semidefinite_tag,))
         _cache[key] = (A_op, M_op)
@@ -534,11 +582,11 @@ def _solve_lineax(
         A_op, M_op = entry
 
     # lineax CG supports stabilise_every and max_steps.
-    solver = lx.CG(rtol=tol, atol=0.0, stabilise_every=stabilise_every, max_steps=maxiter)
+    solver = lx.CG(rtol=tol, atol=0.0, stabilise_every=stabilise_every or None, max_steps=maxiter)
 
     options: Dict[str, Any] = {}
     if M_op is not None:
-        options["preconditioners"] = M_op
+        options["preconditioner"] = M_op
     if x0 is not None:
         options["y0"] = x0
 

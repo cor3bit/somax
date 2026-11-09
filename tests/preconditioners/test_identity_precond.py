@@ -33,7 +33,6 @@ def test_identity_init_and_build_are_state_stable(keys, dtype):
 
     pre_fn, st1 = pre.build(params, op, cst, rng=keys(), lam=None, state=st0)
 
-    # New contract: identity preconditioner returns None (= no preconditioning).
     assert pre_fn is None
 
     # State must be returned as-is (no churn, stable PyTree).

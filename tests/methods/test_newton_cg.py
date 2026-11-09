@@ -31,7 +31,6 @@ def test_newtoncg_mse_smoke(key, medium_shapes, init_mlp_regression, mse_loss, m
 
     assert jnp.isfinite(l1)
     assert l1 < 0.9 * l0
-    # assert l1 < 1e-4
     assert method.plan.lane == "param"
     assert int(info[mx.CG_ITERS]) >= 0
 

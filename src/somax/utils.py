@@ -24,7 +24,6 @@ def nan_scalar(dtype=jnp.float32) -> Scalar:
 
 
 def cadence(step: jax.Array, k: int) -> jax.Array:
-    # k is a Python int (static). If k < 1, disable.
     if k < 1:
         return jnp.asarray(False)
     if k == 1:
@@ -50,7 +49,6 @@ def tree_scale(a: PyTree, s: Scalar) -> PyTree:
 
 def tree_add_scaled(a: PyTree, s: Scalar, b: PyTree) -> PyTree:
     """Return a + s * b elementwise over a pytree."""
-    # JAX XLA will fuse this add+multiply automatically.
     return jtu.tree_map(lambda x, y: x + s * y, a, b)
 
 
@@ -67,7 +65,7 @@ def tree_vdot(a: PyTree, b: PyTree) -> jax.Array:
 
 
 def tree_dot_pair(a: PyTree, b: PyTree) -> tuple[Scalar, Scalar]:
-    """Return (a dot a, a dot b) for PyTrees in a single traversal."""
+    """Return (dot(a, a), dot(a, b)) in one PyTree traversal."""
     dt = jnp.result_type(*jtu.tree_leaves(a), *jtu.tree_leaves(b))
     init = jnp.zeros((2,), dtype=dt)
 
@@ -91,12 +89,8 @@ def tree_norm(a: PyTree) -> Scalar:
 
 
 def tree_rms(a: PyTree, *, acc_dtype=jnp.float32, eps=0.0) -> Scalar:
-    """RMS over all scalar entries in a PyTree: sqrt(mean(x^2)).
-    Single tree traversal. No tree_leaves(). JIT-safe.
-    """
+    """RMS over all PyTree entries: sqrt(mean(x**2))."""
 
-    # This implementation is already optimal: it fuses sum-of-squares
-    # and element-count into a single pass without materializing a flattened view.
     def reducer(acc, x):
         s2, n = acc
         x = jnp.asarray(x, dtype=acc_dtype)
@@ -111,7 +105,6 @@ def tree_rms(a: PyTree, *, acc_dtype=jnp.float32, eps=0.0) -> Scalar:
 
 def tree_all_finite(a: PyTree) -> jax.Array:
     """True if all leaves are finite. Avoids stacking."""
-    # Optimization: tree_reduce with logical_and avoids creating a list/stack of bools.
     is_finite = jtu.tree_map(lambda x: jnp.all(jnp.isfinite(x)), a)
     return jtu.tree_reduce(jnp.logical_and, is_finite, initializer=jnp.array(True))
 
@@ -188,9 +181,9 @@ def prefetch_to_device_single(iterator, size: int = 2, device=None):
                 if queue:
                     item = queue.popleft()
                     cv.notify_all()
-                    yield item
                 elif state["done"]:
                     return
+            yield item
     finally:
         with cv:
             state["stop"] = True

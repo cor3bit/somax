@@ -1,7 +1,13 @@
+import pytest
+
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 
 import somax
+from somax import metrics as mx
+from somax.solvers.row_cg import RowConjugateGradient
+from somax.solvers.row_cg_lifted import LiftedRowConjugateGradient
 
 
 def test_egn_mse_smoke(key, medium_shapes, mlp_apply, make_teacher_regression, init_mlp_regression, mse_loss):
@@ -82,7 +88,7 @@ def test_egn_mse_cg_smoke_decreases(
         lam0=1e-2,
         tol=1e-6,
         maxiter=20,
-        warm_start=True,
+        warm_start=False,
         stabilise_every=10,
         record_cg_stats=True,
         learning_rate=0.2,
@@ -114,9 +120,7 @@ def test_egn_mse_cg_info_schema_and_optional_cg_stats(
         make_teacher_regression,
         init_mlp_regression,
 ):
-    # Telemetry is allowed to be gating-driven. This test enforces:
-    # - step and lam_used are present and sane
-    # - if CG stats are emitted, they are finite and nonnegative
+    # Explicitly requested CG telemetry must be present and finite.
     B, D, H = medium_shapes["B"], medium_shapes["D"], medium_shapes["H"]
     _, batch = make_teacher_regression(key, B, D, H)
     params = init_mlp_regression(jax.random.PRNGKey(12), D, H)
@@ -128,7 +132,7 @@ def test_egn_mse_cg_info_schema_and_optional_cg_stats(
         lam0=lam0,
         tol=1e-6,
         maxiter=10,
-        warm_start=True,
+        warm_start=False,
         stabilise_every=10,
         record_cg_stats=True,
         learning_rate=0.0,  # isolate info/state, do not move params
@@ -140,21 +144,13 @@ def test_egn_mse_cg_info_schema_and_optional_cg_stats(
 
     assert int(st2.step) == 1
     assert int(info["step"]) == 0
-    # lam_used is already commonly emitted by damping policies; keep this invariant.
     assert "lam_used" in info
     assert jnp.isfinite(info["lam_used"])
     assert float(info["lam_used"]) > 0.0
 
-    # Optional CG stats (names may differ by backend). Validate whichever exist.
-    maybe_int_keys = ("cg_iters", "cg_num_iters", "iters", "num_iters")
-    for k in maybe_int_keys:
-        if k in info:
-            assert int(info[k]) >= 0
-
-    maybe_float_keys = ("cg_resid", "cg_r_norm", "resid", "r_norm")
-    for k in maybe_float_keys:
-        if k in info:
-            assert jnp.isfinite(info[k])
+    assert 0 <= int(info[mx.CG_ITERS]) <= int(info[mx.CG_MAXITER])
+    assert jnp.isfinite(info[mx.CG_RESID])
+    assert jnp.asarray(info[mx.CG_CONVERGED]).shape == ()
 
     # lr=0 should keep params unchanged
     assert jax.tree_util.tree_all(
@@ -162,42 +158,78 @@ def test_egn_mse_cg_info_schema_and_optional_cg_stats(
     )
 
 
-def test_egn_mse_cg_warm_start_flag_does_not_change_numerics_on_first_step(
-        key,
-        medium_shapes,
-        mlp_apply,
-        make_teacher_regression,
-        init_mlp_regression,
-        mse_loss,
+@pytest.mark.parametrize("kind", ["mse", "ce"])
+@pytest.mark.parametrize("maxiter", [2, 5])
+def test_egn_cg_lifted_matches_standard_step(
+        kind, maxiter, key, small_shapes,
+        mlp_apply, mlp_logits,
+        init_mlp_regression, init_mlp_classification,
+        make_teacher_regression, make_teacher_classification,
+        monkeypatch,
 ):
-    # First step should be warm-start independent (no previous solution exists).
-    B, D, H = medium_shapes["B"], medium_shapes["D"], medium_shapes["H"]
-    _, batch = make_teacher_regression(key, B, D, H)
-    params0 = init_mlp_regression(jax.random.PRNGKey(13), D, H)
+    """Lifted and ordinary row CG produce equivalent optimizer updates."""
+    B, D, H, C = (small_shapes[k] for k in ("B", "D", "H", "C"))
 
-    def run_once(warm_start: bool):
-        method = somax.make(
-            "egn_mse_cg",
-            predict_fn=mlp_apply,
-            lam0=1e-2,
-            tol=1e-6,
-            maxiter=10,
-            warm_start=warm_start,
-            stabilise_every=10,
-            record_cg_stats=False,
-            learning_rate=0.2,
-        )
-        st = method.init(params0)
-        p1, s1, info1 = method.step(params0, batch, st, rng=jax.random.PRNGKey(0))
-        return p1, s1, info1, method
+    if kind == "mse":
+        _, batch = make_teacher_regression(key, B, D, H)
+        params = init_mlp_regression(jax.random.PRNGKey(21), D, H)
+        predict = mlp_apply
+    else:
+        _, batch = make_teacher_classification(key, B, D, H, C)
+        params = init_mlp_classification(jax.random.PRNGKey(21), D, H, C)
+        predict = mlp_logits
 
-    p_ws, _, _, m_ws = run_once(True)
-    p_cold, _, _, m_cold = run_once(False)
+    options = dict(
+        predict_fn=predict,
+        lam0=0.3,
+        maxiter=maxiter,
+        tol=0.0,
+        learning_rate=1.0,
+        record_cg_stats=True,
+    )
+    ordinary = somax.make(f"egn_{kind}_cg", lifted=False, **options)
+    lifted = somax.make(f"egn_{kind}_cg", lifted=True, **options)
 
-    assert m_ws.plan.lane == "row"
-    assert m_cold.plan.lane == "row"
-    # Allow tiny float32 jitter; first step should match closely.
-    flat_ws, _ = jax.flatten_util.ravel_pytree(p_ws)
-    flat_cold, _ = jax.flatten_util.ravel_pytree(p_cold)
-    assert jnp.allclose(flat_ws, flat_cold, atol=1e-6, rtol=1e-6)
-    assert jnp.isfinite(mse_loss(p_ws, batch))
+    assert type(ordinary.solver) is RowConjugateGradient
+    assert type(lifted.solver) is LiftedRowConjugateGradient
+    assert ordinary.plan.lane == lifted.plan.lane == "row"
+
+    def forbidden_solve(*args, **kwargs):
+        pytest.fail("Lifted solver called ordinary solve()")
+
+    monkeypatch.setattr(lifted.solver, "solve", forbidden_solve)
+
+    p0, s0, i0 = jax.jit(ordinary.step)(
+        params, batch, ordinary.init(params), key
+    )
+    p1, s1, i1 = jax.jit(lifted.step)(
+        params, batch, lifted.init(params), key
+    )
+
+    # Compare actual parameter updates, not parameter values.
+    flat, _ = ravel_pytree(params)
+    flat0, _ = ravel_pytree(p0)
+    flat1, _ = ravel_pytree(p1)
+
+    delta0 = flat0 - flat
+    delta1 = flat1 - flat
+
+    assert jnp.all(jnp.isfinite(delta0))
+    assert jnp.all(jnp.isfinite(delta1))
+
+    rel_error = jnp.linalg.norm(delta1 - delta0) / jnp.maximum(
+        jnp.linalg.norm(delta0), 1e-12
+    )
+    assert float(rel_error) < 2e-4
+
+    # Same CG behavior and optimizer-step progression.
+    assert int(s0.step) == int(s1.step) == 1
+    assert 0 < int(i0[mx.CG_ITERS]) == int(i1[mx.CG_ITERS]) <= maxiter
+    assert bool(i0[mx.CG_CONVERGED]) == bool(i1[mx.CG_CONVERGED])
+
+    assert jnp.isfinite(i0[mx.CG_RESID])
+    assert jnp.isfinite(i1[mx.CG_RESID])
+    assert jnp.allclose(
+        i0[mx.CG_RESID], i1[mx.CG_RESID],
+        rtol=1e-5, atol=1e-7,
+    )

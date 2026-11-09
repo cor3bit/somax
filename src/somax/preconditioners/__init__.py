@@ -1,4 +1,4 @@
-"""Stateful preconditioners that produce M^{-1} for (C + lambda*I)s = g."""
+"""Preconditioner policies for curvature-aware optimization."""
 
 from .base import PreconditionerPolicy, PrecondState, PrecondFn
 from .diag_ema import DiagEMAPrecond

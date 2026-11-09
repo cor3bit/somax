@@ -11,13 +11,13 @@ from ..utils import tree_vdot
 
 
 class Hutchinson(EstimatorPolicy):
-    """
-    Hutchinson estimator for diagonal and trace of a symmetric linear operator C.
+    """Estimate a symmetric operator's diagonal and trace with Rademacher probes.
 
-        diag(C) ~= E[(C z) .* z], z ~ Rademacher
-        tr(C)   ~= E[z^T C z]
+    For independent signs z_i in {-1, +1}:
+        diag(C) = E[(C @ z) * z]
+        trace(C) = E[z @ (C @ z)]
 
-    `n_probes` controls the number of Monte Carlo samples.
+    With use_abs=True, diagonal() averages absolute probe contributions instead.
     """
 
     def __init__(
@@ -27,10 +27,10 @@ class Hutchinson(EstimatorPolicy):
             dtype: Optional[jnp.dtype] = None,
     ):
         self.n_probes = int(n_probes)
+        if self.n_probes < 1:
+            raise ValueError("n_probes must be positive.")
         self.use_abs = bool(use_abs)
         self._dtype = dtype  # if None, inferred from params at call time
-
-    # ---- internals ----
 
     def _make_probe_sampler(self, params: Params):
         """
@@ -43,11 +43,9 @@ class Hutchinson(EstimatorPolicy):
 
         def make_probe(key: PRNGKey) -> PyTree:
             z_flat = jax.random.rademacher(key, (d,), dtype=dtype)
-            return pack(z_flat)
+            return pack(z_flat.astype(flat.dtype))
 
         return make_probe
-
-    # ---- API ----
 
     def diagonal(
             self,
@@ -56,9 +54,6 @@ class Hutchinson(EstimatorPolicy):
             mvp: MatVec,
             rng: PRNGKey,
     ) -> PyTree:
-        """
-        Estimate diag(C) with Hutchinson: E[(C z)  z], z ~ Rademacher.
-        """
         make_probe = self._make_probe_sampler(params)
         keys = jax.random.split(rng, self.n_probes)
 
@@ -87,9 +82,6 @@ class Hutchinson(EstimatorPolicy):
             mvp: MatVec,
             rng: PRNGKey,
     ) -> Scalar:
-        """
-        Estimate tr(C) with Hutchinson: E[z^T C z], z ~ Rademacher.
-        """
         make_probe = self._make_probe_sampler(params)
         keys = jax.random.split(rng, self.n_probes)
 

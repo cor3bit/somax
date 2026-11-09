@@ -38,8 +38,6 @@ class PrecondSpec:
     kwargs: dict[str, Any] | None = None
 
 
-# IDEA: can force calculation of certain additional metrics during the step
-# e.g., train set loss every k, gradient norm, etc.
 # None = unspecified (defer to planner); -1 is an internal sentinel and
 # must not appear in user-facing TelemetrySpec.
 @dataclass(frozen=True)
@@ -50,8 +48,8 @@ class TelemetrySpec:
     record_loss_before: bool = False
     loss_every_k: int | None = None
 
-    record_rho: bool = False
-    rho_every_k: int | None = None
+    record_gain_ratio: bool = False
+    gain_ratio_every_k: int | None = None
 
     record_delta_rms: bool = False
     record_cg: bool = False
@@ -73,6 +71,10 @@ def build_curvature(spec: CurvatureSpec, estimator: Optional[EstimatorSpec] = No
         from .curvature.hessian import ExactHessian
 
         op = ExactHessian(**kw)
+    elif k == "fgnha":
+        from .curvature.fgnha_ce import FGNHA
+
+        op = FGNHA(**kw)
     else:
         raise ValueError(f"Unknown curvature kind: {spec.kind}")
 
@@ -104,11 +106,29 @@ def build_damping(spec: Optional[DampingSpec]) -> Any:
         from .damping.constant import ConstantDamping
 
         return ConstantDamping(lam0=lam0, **kw)
-    if k in ("trust_region", "tr", "lm", "levenberg_marquardt"):
-        from .damping.trust_region import TrustRegionDamping
+    if k in ("scheduled", "schedule"):
+        from .damping.scheduled import ScheduledDamping
 
-        return TrustRegionDamping(lam0=lam0, **kw)
+        if "factor_schedule" not in kw:
+            raise ValueError(
+                "Scheduled damping requires kwargs['factor_schedule']; "
+                "pass any Optax-compatible scalar schedule."
+            )
+        return ScheduledDamping(lam0=lam0, **kw)
+    if k in (
+            "gain_ratio",
+            "gain_ratio_damping",
+            "adaptive_damping",
+            # Backwards-compatible aliases.  The implementation does not reject
+            # or retry steps, so new code should prefer ``gain_ratio``.
+            "trust_region",
+            "tr",
+            "lm",
+            "levenberg_marquardt",
+    ):
+        from .damping.trust_region import GainRatioDamping
 
+        return GainRatioDamping(lam0=lam0, **kw)
     raise ValueError(f"Unknown damping kind: {spec.kind}")
 
 
@@ -123,7 +143,7 @@ def build_solver(spec: SolverSpec, precond: PreconditionerPolicy) -> Any:
         kw["preconditioned"] = not precond.is_identity
         return ConjugateGradient(**kw)
 
-    if k in ("row_cg", "cg_row"):
+    if k in ("row_cg", "cg_row", "row_cg_lifted"):
         from .solvers.row_cg import RowConjugateGradient
 
         # Row CG currently does not support preconditioning.
@@ -135,17 +155,28 @@ def build_solver(spec: SolverSpec, precond: PreconditionerPolicy) -> Any:
             )
 
         kw["preconditioned"] = False
+        if k == "row_cg_lifted":
+            from .solvers.row_cg_lifted import LiftedRowConjugateGradient
+
+            return LiftedRowConjugateGradient(**kw)
         return RowConjugateGradient(**kw)
 
     if k in ("row_cholesky", "cholesky_row", "row_direct"):
-        from .solvers.row_cholesky import RowCholesky
-
-        return RowCholesky(**kw)
-
-    if k in ("direct", "solve"):
         from .solvers.direct import DirectSPD
 
-        return DirectSPD()
+        kw.setdefault("space", "row")
+        kw.setdefault("vector_space", "array")
+        kw.setdefault("solve_method", "chol")
+        kw.setdefault("symmetrize", True)
+        return DirectSPD(**kw)
+
+    if k in ("direct", "solve", "dense_spd"):
+        from .solvers.direct import DirectSPD
+
+        kw.setdefault("space", "param")
+        kw.setdefault("vector_space", "pytree")
+        kw.setdefault("solve_method", "scipy")
+        return DirectSPD(**kw)
 
     if k in ("identity", "diag", "none"):
         from .solvers.identity import IdentitySolve
@@ -186,7 +217,7 @@ def build_telemetry_reqs(spec: TelemetrySpec) -> Requirements:
 
     - metrics: concrete metric keys to include in StepInfo schema
     - loss_every_k: cadence for loss_before
-    - rho_every_k: cadence for rho/loss_after/pred/act-dec pack
+    - gain_ratio_every_k: cadence for gain-ratio/loss_after/pred/act-dec pack
     """
     keys: set[str] = set()
 
@@ -198,14 +229,14 @@ def build_telemetry_reqs(spec: TelemetrySpec) -> Requirements:
     if spec.record_loss_before:
         keys.add(mx.LOSS_BEFORE)
 
-    if spec.record_rho:
+    if spec.record_gain_ratio:
         keys |= {
             mx.LOSS_AFTER,
             mx.PRED_DEC,
             mx.ACT_DEC,
-            mx.RHO,
-            mx.RHO_VALID,
-            mx.STEP_ACCEPTED,
+            mx.GAIN_RATIO,
+            mx.GAIN_RATIO_VALID,
+            mx.STEP_IMPROVED,
         }
 
     if spec.record_cg:
@@ -219,15 +250,18 @@ def build_telemetry_reqs(spec: TelemetrySpec) -> Requirements:
     if spec.record_delta_rms:
         keys.add(mx.DELTA_RMS)
 
-    rho_every_k = getattr(spec, "rho_every_k", None)
-    if spec.record_rho:
-        if rho_every_k is None:
-            rho_every_k_req = 0
+    if spec.record_lam:
+        keys.add(mx.LAM_NEXT)
+
+    gain_ratio_every_k = getattr(spec, "gain_ratio_every_k", None)
+    if spec.record_gain_ratio:
+        if gain_ratio_every_k is None:
+            gain_ratio_every_k_req = 0
         else:
-            rho_every_k_req = int(rho_every_k)
-            assert rho_every_k_req > 0
+            gain_ratio_every_k_req = int(gain_ratio_every_k)
+            assert gain_ratio_every_k_req > 0
     else:
-        rho_every_k_req = 0
+        gain_ratio_every_k_req = 0
 
     loss_every_k = getattr(spec, "loss_every_k", None)
     if getattr(spec, "record_loss_before", False) or getattr(spec, "record_loss_after", False):
@@ -242,5 +276,5 @@ def build_telemetry_reqs(spec: TelemetrySpec) -> Requirements:
     return Requirements(
         metrics=frozenset(keys),
         loss_every_k=loss_every_k_req,
-        rho_every_k=rho_every_k_req,
+        gain_ratio_every_k=gain_ratio_every_k_req,
     )

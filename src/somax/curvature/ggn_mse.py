@@ -4,8 +4,14 @@ import jax
 import jax.numpy as jnp
 from flax import struct
 
-from ..types import Batch, PredictFn, Scalar, Updates, Params
-from .base import CurvatureOperator, CurvatureState, RowOperator
+from ..types import Batch, PredictFnLike, Scalar, Updates, Params
+from .base import (
+    CurvatureOperator,
+    CurvatureState,
+    RowOperator,
+    linearize_predict,
+    predict_only,
+)
 
 
 @struct.dataclass
@@ -19,16 +25,23 @@ class _Cache:
     alpha: jnp.ndarray  # scalar array 1/B
 
 
+def _squeeze_scalar_output(yhat: jnp.ndarray) -> jnp.ndarray:
+    if yhat.ndim == 2 and yhat.shape[-1] == 1:
+        return yhat.squeeze(-1)
+    return yhat
+
+
 class GGNMSE(CurvatureOperator):
     """Generalized Gauss-Newton for 0.5 * mean (yhat - y)^2 (mean reduction)."""
 
     def __init__(
             self,
             *,
-            predict_fn: PredictFn,
+            predict_fn: PredictFnLike,
             x_key: str = "x",
             y_key: str = "y",
             reduction: str = "mean",
+            has_aux: bool = False,
     ):
         if reduction != "mean":
             raise ValueError("GGNMSE supports only reduction='mean'.")
@@ -36,22 +49,34 @@ class GGNMSE(CurvatureOperator):
         self.x_key = x_key
         self.y_key = y_key
         self.reduction = reduction
+        self.has_aux = bool(has_aux)
 
-    def init(self, params: Params, batch: Batch, *, with_grad: bool = False) -> tuple[CurvatureState, Any]:
+    def init(
+            self,
+            params: Params,
+            batch: Batch,
+            *,
+            model_state: Any = (),
+            with_grad: bool = False,
+    ) -> tuple[CurvatureState, Any]:
         x = batch[self.x_key]
 
-        def f(p):
-            yhat = self.predict_fn(p, x)
-            if yhat.ndim == 2 and yhat.shape[-1] == 1:
-                yhat = yhat.squeeze(-1)
-            return yhat
-
-        yhat, Jv = jax.linearize(f, params)
+        yhat, Jv, model_state_new = linearize_predict(
+            predict_fn=self.predict_fn,
+            params=params,
+            x=x,
+            model_state=model_state,
+            has_aux=self.has_aux,
+            output_transform=_squeeze_scalar_output,
+        )
         JT = jax.linear_transpose(Jv, params)
 
         y = batch[self.y_key]
         if y.ndim == 2 and y.shape[-1] == 1:
             y = y.squeeze(-1)
+
+        if yhat.ndim != 1 or y.shape != yhat.shape:
+            raise ValueError("GGNMSE requires predictions and targets of shape (B,) or (B, 1).")
 
         r = (yhat - y).astype(yhat.dtype)
         b = int(r.shape[0])
@@ -63,7 +88,10 @@ class GGNMSE(CurvatureOperator):
             grad = ()
 
         cache = _Cache(yhat=yhat, jvp=Jv, vjp=JT, r=r, b=b, alpha=alpha)
-        return CurvatureState(cache=cache), grad
+        return CurvatureState(
+            cache=cache,
+            model_state_new=model_state_new,
+        ), grad
 
     def matvec(self, params: Params, state: CurvatureState, v: Updates) -> Updates:
         c: _Cache = state.cache
@@ -75,14 +103,27 @@ class GGNMSE(CurvatureOperator):
         c: _Cache = state.cache
         return 0.5 * jnp.mean(jnp.square(c.r))
 
-    def loss_only(self, params: Params, batch: Batch) -> Scalar:
+    def loss_only(
+            self,
+            params: Params,
+            batch: Batch,
+            *,
+            model_state: Any = (),
+    ) -> Scalar:
         x = batch[self.x_key]
         y = batch[self.y_key]
-        yhat = self.predict_fn(params, x)
-        if yhat.ndim == 2 and yhat.shape[-1] == 1:
-            yhat = yhat.squeeze(-1)
+        yhat = predict_only(
+            predict_fn=self.predict_fn,
+            params=params,
+            x=x,
+            model_state=model_state,
+            has_aux=self.has_aux,
+            output_transform=_squeeze_scalar_output,
+        )
         if y.ndim == 2 and y.shape[-1] == 1:
             y = y.squeeze(-1)
+        if yhat.ndim != 1 or y.shape != yhat.shape:
+            raise ValueError("GGNMSE requires predictions and targets of shape (B,) or (B, 1).")
         r = (yhat - y).astype(yhat.dtype)
         return 0.5 * jnp.mean(jnp.square(r))
 

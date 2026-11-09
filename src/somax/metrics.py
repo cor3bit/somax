@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 
 # -------------------------
-# Metric keys
+# Metric keys (stable strings)
 # -------------------------
 
 STEP = "step"
@@ -34,11 +34,15 @@ S_RMS = "s_rms"
 
 PRED_DEC = "pred_dec"
 ACT_DEC = "act_dec"
-RHO = "rho"
-RHO_VALID = "rho_valid"
-STEP_ACCEPTED = "step_accepted"
+GAIN_RATIO = "gain_ratio"
+GAIN_RATIO_VALID = "gain_ratio_valid"
+# Diagnostic only: the candidate lowered the same-batch loss.  The executor
+# always commits candidates; there is no accept/reject transaction.  Keep the
+# legacy wire key for compatibility with existing logs.
+STEP_IMPROVED = "step_accepted"
+STEP_ACCEPTED = STEP_IMPROVED  # deprecated Python alias
 
-TR_ACTION = "tr_action"  # int32: -1 dec, 0 keep, +1 inc
+TR_ACTION = "tr_action"  # int32: -1 dec, 0 keep/skip, +1 inc
 
 DELTA_RMS = "delta_rms"
 
@@ -63,8 +67,8 @@ KIND: Dict[str, str] = {
     LANE: "i32",
 
     # bool
-    RHO_VALID: "bool",
-    STEP_ACCEPTED: "bool",
+    GAIN_RATIO_VALID: "bool",
+    STEP_IMPROVED: "bool",
     LAM_CLIPPED: "bool",
     CG_CONVERGED: "bool",
 }

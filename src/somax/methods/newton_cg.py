@@ -21,9 +21,9 @@ def newton_cg(
 
         # CG params
         tol: float = 1e-5,
-        maxiter: int = 20,
-        warm_start: bool = True,
-        stabilise_every: int = 10,
+        maxiter: int = 10,
+        warm_start: bool = False,
+        stabilise_every: int = 0,
 
         # Preconditioner for CG
         estimator: str | None = None,
@@ -33,7 +33,7 @@ def newton_cg(
 
         # telemetry
         record_loss_every_k: int = -1,
-        record_rho_every_k: int = -1,
+        record_gain_ratio_every_k: int = -1,
         record_lam: bool = False,
         record_cg_stats: bool = True,
 
@@ -77,9 +77,9 @@ def newton_cg(
         loss_every_k=(
             record_loss_every_k if record_loss_every_k > 0 else None
         ),
-        record_rho=(record_rho_every_k > 0),
-        rho_every_k=(
-            record_rho_every_k if record_rho_every_k > 0 else None
+        record_gain_ratio=(record_gain_ratio_every_k > 0),
+        gain_ratio_every_k=(
+            record_gain_ratio_every_k if record_gain_ratio_every_k > 0 else None
         ),
         record_lam=record_lam,
         record_cg=record_cg_stats,

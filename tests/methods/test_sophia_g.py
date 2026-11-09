@@ -18,6 +18,7 @@ def _ce_loss(predict_fn, params, batch):
 
 
 def test_sophiag_first_step_reconstructs_true_grad_when_gamma1_beta0(key):
+    lr = 0.1
     B, d, C = 6, 5, 3
     kx, kw, kb, krng = jax.random.split(key, 4)
     x = jax.random.normal(kx, (B, d))
@@ -37,14 +38,13 @@ def test_sophiag_first_step_reconstructs_true_grad_when_gamma1_beta0(key):
         eps=0.0,
         n_samples=1,
         eval_every_k=1,
-        learning_rate=0.0,
+        learning_rate=lr,
         weight_decay=0.0,
         clip_value=1e9,
     )
     st0 = method.init(params)
 
     params1, st1, _ = method.step(params, batch, st0, rng=krng)
-    chex.assert_trees_all_close(params1, params, atol=0.0, rtol=0.0)
 
     g_true = jax.grad(lambda p: _ce_loss(_linear_logits, p, batch))(params)
 
@@ -53,6 +53,8 @@ def test_sophiag_first_step_reconstructs_true_grad_when_gamma1_beta0(key):
 
     s_hat = jtu.tree_map(lambda g, vv: g / vv, g_true, v)
     chex.assert_tree_all_finite(s_hat)
+    expected = jtu.tree_map(lambda p, direction: p - lr * direction, params, s_hat)
+    chex.assert_trees_all_close(params1, expected, atol=1e-5, rtol=1e-5)
     assert int(st1.step) == 1
     assert method.plan.lane == "diag"
 
@@ -90,6 +92,7 @@ def test_sophiag_lazy_curvature_updates_every_k(key):
     chex.assert_trees_all_close(st2.precond_state.v, st1.precond_state.v, atol=0.0, rtol=0.0)
     chex.assert_trees_all_close(st3.precond_state.v, st2.precond_state.v, atol=0.0, rtol=0.0)
     chex.assert_tree_all_finite(st4.precond_state.v)
+    assert tuple(int(st.precond_state.t_ema) for st in (st1, st2, st3, st4)) == (1, 1, 1, 2)
 
 
 def test_sophiag_tx_clip_then_decay_semantics():
@@ -153,7 +156,7 @@ def test_sophiag_ce_smoke(
 
 
 # -------------------------------------------------------------------------
-# Additional paranoia tests: numerator momentum m_t and denom EMA v_t
+# Numerator momentum and denominator EMA state
 # -------------------------------------------------------------------------
 
 def test_sophiag_numerator_momentum_m_t_updates_exactly_with_beta1(key):

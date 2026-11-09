@@ -28,15 +28,15 @@ def build_optax_tx(
 
     transforms: list[optax.GradientTransformation] = []
 
-    # Momentum on direction s (before safety transforms)
+    # Momentum on direction s (before safety transforms).
     if direction_momentum is not None:
         transforms.append(optax.trace(decay=float(direction_momentum), nesterov=nesterov))
 
-    # Clip by global norm (on direction, after momentum)
+    # Clip by global norm (on direction, after momentum).
     if clip_norm is not None:
         transforms.append(optax.clip_by_global_norm(float(clip_norm)))
 
-    # Add weight decay (not clipped; add after clipping)
+    # Add weight decay (not clipped; add after clipping).
     if weight_decay is not None:
         transforms.append(optax.add_decayed_weights(float(weight_decay), mask=weight_decay_mask))
 

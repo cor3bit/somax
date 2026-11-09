@@ -33,7 +33,14 @@ class ExactHessian(CurvatureOperator):
         self.y_key = y_key
         self.reduction = reduction
 
-    def init(self, params: Params, batch: Batch, with_grad: bool = False) -> tuple[CurvatureState, Any]:
+    def init(
+            self,
+            params: Params,
+            batch: Batch,
+            with_grad: bool = False,
+            *,
+            model_state: Any = (),
+    ) -> tuple[CurvatureState, Any]:
         def f(p):
             return self.loss_fn(p, batch)
 
@@ -46,9 +53,15 @@ class ExactHessian(CurvatureOperator):
             return jvp_vg(v)[1]
 
         if with_grad:
-            return CurvatureState(cache=_Cache(loss_val=loss_val, hvp=hvp)), g
+            return CurvatureState(
+                cache=_Cache(loss_val=loss_val, hvp=hvp),
+                model_state_new=model_state,
+            ), g
         else:
-            return CurvatureState(cache=_Cache(loss_val=loss_val, hvp=hvp)), ()
+            return CurvatureState(
+                cache=_Cache(loss_val=loss_val, hvp=hvp),
+                model_state_new=model_state,
+            ), ()
 
     def matvec(self, params: Params, state: CurvatureState, v: Updates) -> Updates:
         return state.cache.hvp(v)
@@ -56,7 +69,14 @@ class ExactHessian(CurvatureOperator):
     def loss(self, params: Params, state: CurvatureState, batch: Batch) -> Scalar:
         return state.cache.loss_val
 
-    def loss_only(self, params: Params, batch: Batch) -> Scalar:
+    def loss_only(
+            self,
+            params: Params,
+            batch: Batch,
+            *,
+            model_state: Any = (),
+    ) -> Scalar:
+        del model_state
         return self.loss_fn(params, batch)
 
     def row_op(self, params: Params, state: CurvatureState, batch: Batch) -> RowOperator:

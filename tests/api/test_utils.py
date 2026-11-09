@@ -343,7 +343,6 @@ def test_tree_rms_jit_compatible(key):
 def test_all_finite_true(key):
     a = {"w": jax.random.normal(key, (5,)), "b": jnp.ones((3,))}
     result = utils.tree_all_finite(a)
-    # Correct: check truthiness, not identity (is True)
     assert result
 
 
@@ -468,6 +467,24 @@ def test_prefetch_basic():
     assert len(results) == 5
     for i, batch in enumerate(results):
         assert jnp.allclose(batch["x"], jnp.array([i], dtype=jnp.float32))
+
+
+def test_prefetch_does_not_hold_condition_lock_while_yielding():
+    import threading
+
+    producer_advanced = threading.Event()
+
+    def data_gen():
+        yield {"x": jnp.array([0])}
+        producer_advanced.set()
+        yield {"x": jnp.array([1])}
+
+    batches = utils.prefetch_to_device_single(data_gen(), size=1)
+    try:
+        next(batches)
+        assert producer_advanced.wait(timeout=2.0)
+    finally:
+        batches.close()
 
 
 def test_prefetch_empty_iterator():

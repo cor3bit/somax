@@ -4,15 +4,16 @@ from ..presets import register
 from ..assembler import assemble
 from ..optax import build_optax_tx
 from ..specs import CurvatureSpec, DampingSpec, SolverSpec, PrecondSpec, EstimatorSpec, TelemetrySpec
-from ..types import PredictFn, ScalarOrSchedule
+from ..types import PredictFnLike, ScalarOrSchedule
 
 
 @register("sgn_mse", desc="SGN (MSE): GGN + param-space CG.")
 def sgn_mse(
         *,
-        predict_fn: PredictFn,
+        predict_fn: PredictFnLike,
         x_key: str = "x",
         y_key: str = "y",
+        has_aux: bool = False,
 
         # damping params
         lam_policy: str = "const",
@@ -21,9 +22,9 @@ def sgn_mse(
 
         # CG params
         tol: float = 1e-5,
-        maxiter: int = 20,
-        warm_start: bool = True,
-        stabilise_every: int = 10,
+        maxiter: int = 10,
+        warm_start: bool = False,
+        stabilise_every: int = 0,
 
         # Preconditioner for CG
         estimator: str | None = None,
@@ -33,7 +34,7 @@ def sgn_mse(
 
         # telemetry
         record_loss_every_k: int = -1,
-        record_rho_every_k: int = -1,
+        record_gain_ratio_every_k: int = -1,
         record_lam: bool = False,
         record_cg_stats: bool = True,
 
@@ -50,6 +51,7 @@ def sgn_mse(
     curv = CurvatureSpec(
         "ggn_mse", {
             "predict_fn": predict_fn,
+            "has_aux": has_aux,
             "x_key": x_key,
             "y_key": y_key,
             "reduction": "mean",
@@ -77,9 +79,9 @@ def sgn_mse(
         loss_every_k=(
             record_loss_every_k if record_loss_every_k > 0 else None
         ),
-        record_rho=(record_rho_every_k > 0),
-        rho_every_k=(
-            record_rho_every_k if record_rho_every_k > 0 else None
+        record_gain_ratio=(record_gain_ratio_every_k > 0),
+        gain_ratio_every_k=(
+            record_gain_ratio_every_k if record_gain_ratio_every_k > 0 else None
         ),
         record_lam=record_lam,
         record_cg=record_cg_stats,
@@ -103,9 +105,10 @@ def sgn_mse(
 @register("sgn_ce", desc="SGN (CE): GGN + param-space CG.")
 def sgn_ce(
         *,
-        predict_fn: PredictFn,
+        predict_fn: PredictFnLike,
         x_key: str = "x",
         y_key: str = "y",
+        has_aux: bool = False,
 
         # damping params
         lam_policy: str = "const",
@@ -114,9 +117,9 @@ def sgn_ce(
 
         # CG params
         tol: float = 1e-5,
-        maxiter: int = 20,
-        warm_start: bool = True,
-        stabilise_every: int = 10,
+        maxiter: int = 10,
+        warm_start: bool = False,
+        stabilise_every: int = 0,
 
         # Preconditioner for CG
         estimator: str | None = None,
@@ -126,7 +129,7 @@ def sgn_ce(
 
         # telemetry
         record_loss_every_k: int = -1,
-        record_rho_every_k: int = -1,
+        record_gain_ratio_every_k: int = -1,
         record_lam: bool = False,
         record_cg_stats: bool = True,
 
@@ -143,6 +146,7 @@ def sgn_ce(
     curv = CurvatureSpec(
         "ggn_ce", {
             "predict_fn": predict_fn,
+            "has_aux": has_aux,
             "x_key": x_key,
             "y_key": y_key,
             "reduction": "mean",
@@ -171,9 +175,9 @@ def sgn_ce(
         loss_every_k=(
             record_loss_every_k if record_loss_every_k > 0 else None
         ),
-        record_rho=(record_rho_every_k > 0),
-        rho_every_k=(
-            record_rho_every_k if record_rho_every_k > 0 else None
+        record_gain_ratio=(record_gain_ratio_every_k > 0),
+        gain_ratio_every_k=(
+            record_gain_ratio_every_k if record_gain_ratio_every_k > 0 else None
         ),
         record_lam=record_lam,
         record_cg=record_cg_stats,

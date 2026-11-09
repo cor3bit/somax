@@ -111,6 +111,7 @@ def test_sophiah_lazy_curvature_cadence_eval_every_k():
     chex.assert_trees_all_close(st2.precond_state.v, st1.precond_state.v, atol=0.0, rtol=0.0)
     chex.assert_trees_all_close(st3.precond_state.v, st2.precond_state.v, atol=0.0, rtol=0.0)
     chex.assert_tree_all_finite(st4.precond_state.v)
+    assert tuple(int(st.precond_state.t_ema) for st in (st1, st2, st3, st4)) == (1, 1, 1, 2)
 
 
 def test_sophiah_tx_clip_then_decay_semantics():
@@ -139,7 +140,7 @@ def test_sophiah_tx_clip_then_decay_semantics():
 
 
 # -------------------------------------------------------------------------
-# Additional paranoia tests: numerator momentum m_t and denom EMA v_t
+# Numerator momentum and denominator EMA state
 # -------------------------------------------------------------------------
 
 def test_sophiah_numerator_momentum_m_t_updates_exactly_with_beta1():

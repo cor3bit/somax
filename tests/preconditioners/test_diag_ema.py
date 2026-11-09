@@ -43,6 +43,13 @@ def _full_like(tree, val):
     return jax.tree_util.tree_map(lambda x: jnp.full_like(x, val), tree)
 
 
+@pytest.mark.parametrize("beta", [1.0, 0.99999999])
+@pytest.mark.parametrize("name", ["beta1", "beta2"])
+def test_rejects_ema_coefficients_rounded_to_one(name, beta):
+    with pytest.raises(ValueError, match=name):
+        DiagEMAPrecond(**{name: beta})
+
+
 def test_init_shapes_and_defaults(keys, dtype):
     params = _rand_params(keys, dtype)
     pre = DiagEMAPrecond()

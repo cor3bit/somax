@@ -159,6 +159,10 @@ def test_adahessian_jit_determinism_one_step():
     assert int(s1.step) == int(s2.step) == 1
 
 
+# -------------------------------------------------------------------------
+# Numerator momentum and denominator EMA state
+# -------------------------------------------------------------------------
+
 def test_adahessian_numerator_momentum_m_t_updates_exactly_with_beta1():
     # Validate stored m_t recurrence:
     # m_t = beta1 * m_{t-1} + (1-beta1) * g_t

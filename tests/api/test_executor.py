@@ -1,6 +1,6 @@
-from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
@@ -9,94 +9,90 @@ from flax import struct
 from flax.core import FrozenDict
 
 from somax import metrics as mx
-from somax.damping.base import DampingState
-from somax.executor import step_param
+from somax.damping import ConstantDamping
+from somax.executor import step_diag, step_param, step_row
 from somax.planner import Requirements, build_plan
+from somax.utils import tree_norm2, tree_vdot
+from somax.curvature.fgnha_ce import FGNHA
+from somax.curvature.base import CurvatureState
+from somax.preconditioners.diag_direct import DiagDirectPrecond
+from somax.solvers.identity import IdentitySolve
+from somax.executor import _gain_ratio_pack_param, _gain_ratio_pack_row
 
 
 # ---------------- Tiny fake components ----------------
 
-
 class QuadOp:
     """Quadratic objective: loss = 0.5 * ||params||^2, grad = params, curvature = I."""
 
-    def init(self, params, batch, *, with_grad: bool):
-        # cstate can be anything; executor keeps it alive for matvec.
-        cstate = ()
-        grad = params if with_grad else ()
-        return cstate, grad
+    def init(self, params, batch, *, model_state=(), with_grad: bool):
+        del batch
+        return CurvatureState(model_state_new=model_state), (params if with_grad else ())
 
     def loss(self, params, cstate, batch):
-        leaves = jax.tree_util.tree_leaves(params)
-        v = jnp.concatenate([jnp.ravel(x) for x in leaves], axis=0) if len(leaves) > 1 else jnp.ravel(leaves[0])
-        return jnp.asarray(0.5, v.dtype) * jnp.vdot(v, v)
+        del cstate, batch
+        return 0.5 * jnp.vdot(params, params)
 
-    def loss_only(self, params, batch):
-        return self.loss(params, (), batch)
+    def loss_only(self, params, batch, *, model_state=()):
+        del batch, model_state
+        return 0.5 * jnp.vdot(params, params)
 
     def matvec(self, params, cstate, v):
-        # I * v
+        del params, cstate
         return v
 
 
-class DirectSolver:
-    """Solve (I + lam I) s = grad -> s = grad / (1+lam)."""
+class _IdentityRowOp:
+    def __init__(self, rhs):
+        self.rhs = rhs
+        self.b = 1
+
+    def jvp(self, v):
+        return v.reshape((-1,))
+
+    def vjp(self, u):
+        return u.reshape(self.rhs.shape)
+
+
+class QuadRowOp(QuadOp):
+    def row_op(self, params, cstate, batch):
+        del cstate, batch
+        return _IdentityRowOp(params.reshape((-1,)))
+
+
+class DirectSolve:
+    """Exact solve for tests where A is a scalar multiple of the identity."""
+
+    space = "param"
+
+    def init(self, params):
+        del params
+        return ()
 
     def solve(self, A_mv, rhs, *, state, precond):
-        # rhs is a PyTree
-        # figure out lam by probing A_mv on rhs: A(rhs) = rhs + lam*rhs for our A_mv in executor
-        Arhs = A_mv(rhs)
-        # Estimate scalar lam from first leaf ratio: Arhs = (1+lam)*rhs
-        leaf_rhs = jax.tree_util.tree_leaves(rhs)[0]
-        leaf_Arhs = jax.tree_util.tree_leaves(Arhs)[0]
-        ratio = (leaf_Arhs / jnp.maximum(leaf_rhs, jnp.asarray(1e-12, leaf_rhs.dtype))).mean()
-        lam = jnp.maximum(ratio - jnp.asarray(1.0, ratio.dtype), jnp.asarray(0.0, ratio.dtype))
+        del precond
+        arhs = A_mv(rhs)
+        denom = jnp.maximum(jnp.vdot(rhs, rhs), jnp.asarray(1e-30, rhs.dtype))
+        alpha = jnp.vdot(rhs, arhs) / denom
+        s = rhs / alpha
+        return s, {}, state
 
-        denom = jnp.asarray(1.0, lam.dtype) + lam
-        s = jax.tree_util.tree_map(lambda x: x / denom, rhs)
 
-        info = {}  # executor will default-fill cg stats if not requested
-        return s, info, state
+class DirectRowSolve(DirectSolve):
+    space = "row"
 
 
 class NullPrecond:
+    is_identity = True
+
     def needed_metrics(self):
         return frozenset()
 
     def build(self, *, params, op, cstate, rng, lam, state):
+        del params, op, cstate, rng, lam
         return None, state
 
 
-class DummyDampingNoOp:
-    """No-op damping. Exposes every_k only for planner; update returns same lam."""
-    every_k: int = 1
-
-    def needed_metrics(self):
-        # TR-like: needs rho to decide, but update is no-op here.
-        return frozenset({mx.STEP, mx.RHO, mx.RHO_VALID})
-
-    def init(self):
-        return DampingState(lam=jnp.asarray(1.0, jnp.float32), aux=())
-
-    def update(self, state, info):
-        return state
-
-
-@struct.dataclass
-class ExecState:
-    step: jax.Array
-    damp_state: Any
-    precond_state: Any
-    solver_state: Any
-    opt_state: Any
-    method_state: Any
-
-    # Match flax.struct dataclass API used by executor.
-    def replace(self, **kwargs):
-        return self.replace(**kwargs)  # pragma: no cover
-
-
-# Use Flax struct dataclass to get .replace method.
 @struct.dataclass
 class State:
     step: jax.Array
@@ -105,9 +101,7 @@ class State:
     solver_state: Any
     opt_state: Any
     method_state: Any
-
-
-# ---------------- Tests ----------------
+    model_state: Any = ()
 
 
 def _init_state(params, damping, tx):
@@ -121,22 +115,96 @@ def _init_state(params, damping, tx):
     )
 
 
-def test_executor_step_param_jit_and_schema(dtype):
+def _make_plan(*, solver, lam0=1.0, gain_ratio_every_k=-1):
+    telemetry = Requirements(
+        metrics=frozenset(
+            {
+                mx.LOSS_BEFORE,
+                mx.LOSS_AFTER,
+                mx.PRED_DEC,
+                mx.ACT_DEC,
+                mx.GAIN_RATIO,
+                mx.GAIN_RATIO_VALID,
+                mx.STEP_IMPROVED,
+                mx.LAM_NEXT,
+            }
+        ),
+        gain_ratio_every_k=gain_ratio_every_k,
+    )
+    return build_plan(
+        damping=ConstantDamping(lam0=lam0),
+        solver=solver,
+        precond=NullPrecond(),
+        telemetry_reqs=telemetry,
+    )
+
+
+def _expected_quadratic_step(params, lam):
+    """Exact diagnostics for one damped solve on f(theta)=0.5||theta||^2.
+
+    The candidate is generated by the damped system, but predicted reduction is
+    measured with the undamped objective model. Since the objective is exactly
+    quadratic, actual and predicted reductions must agree for every lambda.
+    """
+    params = jnp.asarray(params)
+    lam = jnp.asarray(lam, params.dtype)
+
+    delta = -params / (1.0 + lam)
+    new_params = params + delta
+
+    loss_before = 0.5 * jnp.vdot(params, params)
+    loss_after = 0.5 * jnp.vdot(new_params, new_params)
+    act_dec = loss_before - loss_after
+
+    g_dot_d = jnp.vdot(params, delta)
+    d_C_d = jnp.vdot(delta, delta)
+    pred_dec = -(g_dot_d + 0.5 * d_C_d)
+    gain_ratio = act_dec / pred_dec
+
+    return new_params, {
+        mx.LOSS_BEFORE: loss_before,
+        mx.LOSS_AFTER: loss_after,
+        mx.ACT_DEC: act_dec,
+        mx.PRED_DEC: pred_dec,
+        mx.GAIN_RATIO: gain_ratio,
+        mx.LAM_USED: lam,
+        mx.LAM_NEXT: lam,
+        mx.LAM_FACTOR: jnp.asarray(1.0, params.dtype),
+    }
+
+
+def _assert_exact_info(info, expected):
+    for key in (
+            mx.LOSS_BEFORE,
+            mx.LOSS_AFTER,
+            mx.ACT_DEC,
+            mx.PRED_DEC,
+            mx.GAIN_RATIO,
+            mx.LAM_USED,
+            mx.LAM_NEXT,
+            mx.LAM_FACTOR,
+    ):
+        np.testing.assert_allclose(
+            np.asarray(info[key]),
+            np.asarray(expected[key]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+    assert bool(info[mx.GAIN_RATIO_VALID])
+    assert bool(info[mx.STEP_IMPROVED])
+    assert int(info[mx.STEP]) == 0
+
+
+@pytest.mark.parametrize("lam", [0.1, 1.0, 10.0])
+def test_executor_step_param_exact_quadratic_gain_ratio_is_one(dtype, lam):
     op = QuadOp()
-    solver = DirectSolver()
+    solver = DirectSolve()
     precond = NullPrecond()
-    damping = DummyDampingNoOp()
+    damping = ConstantDamping(lam0=lam)
+    plan = _make_plan(solver=solver, lam0=lam)
+    tx = optax.scale(-1.0)
 
-    # Request metrics that exercise base + rho pack + damping next.
-    telemetry = Requirements(metrics=frozenset({mx.RHO, mx.LAM_NEXT, mx.LAM_FACTOR, mx.LOSS_BEFORE}))
-    plan = build_plan(damping=damping, solver=solver, precond=precond, telemetry_reqs=telemetry)
-
-    # Use optax scale as "tx" (post-direction transform).
-    tx = optax.scale(-0.1)
-
-    params = {"w": jnp.asarray([1.0, -2.0, 3.0], dtype)}
-    batch = {"x": jnp.zeros((1,), dtype), "y": jnp.zeros((1,), dtype)}
-    rng = jax.random.PRNGKey(0)
+    params = jnp.asarray([1.0, 2.0, 3.0], dtype)
     state = _init_state(params, damping, tx)
 
     @jax.jit
@@ -149,50 +217,172 @@ def test_executor_step_param_jit_and_schema(dtype):
             damping=damping,
             tx=tx,
             params=p,
-            batch=batch,
-            rng=rng,
+            batch={},
+            rng=jax.random.PRNGKey(0),
             state=st,
         )
 
-    params2, state2, info = run(params, state)
+    params_new, state_new, info = run(params, state)
+    expected_params, expected_info = _expected_quadratic_step(params, lam=lam)
 
     assert isinstance(info, FrozenDict)
     assert set(info.keys()) == set(plan.metric_keys)
-
-    # Step increments.
-    assert int(state2.step) == 1
-
-    # Some invariants: lam_next exists because telemetry requested it.
-    assert jnp.isfinite(info[mx.LAM_NEXT])
-    assert jnp.isfinite(info[mx.LAM_FACTOR])
-
-    # Rho pack requested -> rho_valid should be bool scalar.
-    assert info[mx.RHO_VALID].dtype == jnp.bool_
-    assert info[mx.STEP].dtype == jnp.int32
+    assert int(state_new.step) == 1
+    np.testing.assert_allclose(params_new, expected_params, rtol=1e-6, atol=1e-6)
+    _assert_exact_info(info, expected_info)
+    np.testing.assert_allclose(info[mx.GAIN_RATIO], 1.0, rtol=1e-6, atol=1e-6)
 
 
-def test_executor_rho_pack_respects_cadence(dtype):
-    op = QuadOp()
-    solver = DirectSolver()
+def test_executor_step_diag_gain_ratio_preserves_float64_loss_precision():
+    class OffsetQuadOp(QuadOp):
+        def loss(self, params, cstate, batch):
+            return super().loss(params, cstate, batch) + jnp.asarray(1e8, params.dtype)
+
+        def loss_only(self, params, batch, *, model_state=()):
+            return super().loss_only(params, batch, model_state=model_state) + jnp.asarray(1e8, params.dtype)
+
+        def diagonal(self, params, cstate, rng):
+            return jnp.ones_like(params)
+
+    with jax.enable_x64():
+        params = jnp.asarray([2.0], jnp.float64)
+        op = OffsetQuadOp()
+        solver = IdentitySolve()
+        precond = DiagDirectPrecond(eps=0.0)
+        damping = ConstantDamping(lam0=1.0)
+        tx = optax.scale(-1.0)
+        plan = build_plan(
+            damping=damping,
+            solver=solver,
+            precond=precond,
+            telemetry_reqs=Requirements(metrics=frozenset({mx.GAIN_RATIO}), gain_ratio_every_k=1),
+        )
+        state = _init_state(params, damping, tx).replace(
+            precond_state=precond.init(params), solver_state=solver.init(params)
+        )
+
+        @jax.jit
+        def run(p, st):
+            return step_diag(
+                plan=plan, op=op, solver=solver, precond=precond,
+                damping=damping, tx=tx, params=p, batch={},
+                rng=jax.random.PRNGKey(0), state=st,
+            )
+
+        params_new, _, info = run(params, state)
+        np.testing.assert_allclose(params_new, [1.0], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(info[mx.GAIN_RATIO], 1.0, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("lam", [0.1, 1.0, 10.0])
+def test_executor_step_row_exact_quadratic_gain_ratio_is_one(dtype, lam):
+    op = QuadRowOp()
+    solver = DirectRowSolve()
     precond = NullPrecond()
-    damping = DummyDampingNoOp()
+    damping = ConstantDamping(lam0=lam)
+    plan = _make_plan(solver=solver, lam0=lam)
+    tx = optax.scale(-1.0)
 
-    # Ask for rho metrics so want_rho_pack=True.
-    telemetry = Requirements(metrics=frozenset({mx.RHO, mx.RHO_VALID, mx.LOSS_AFTER, mx.PRED_DEC, mx.ACT_DEC}))
-    plan = build_plan(damping=damping, solver=solver, precond=precond, telemetry_reqs=telemetry)
+    params = jnp.asarray([1.0, 2.0, 3.0], dtype)
+    state = _init_state(params, damping, tx)
 
-    # Force cadence to every 2 steps (0,2,4,...). This is planner-owned; safe to overwrite here.
-    plan = plan.__class__(
-        lane=plan.lane,
-        req=plan.req.__class__(metrics=plan.req.metrics, loss_every_k=plan.req.loss_every_k, rho_every_k=2),
-        metric_keys=plan.metric_keys,
-        want=plan.want,
+    @jax.jit
+    def run(p, st):
+        return step_row(
+            plan=plan,
+            op=op,
+            solver=solver,
+            precond=precond,
+            damping=damping,
+            tx=tx,
+            params=p,
+            batch={},
+            rng=jax.random.PRNGKey(0),
+            state=st,
+        )
+
+    params_new, state_new, info = run(params, state)
+    expected_params, expected_info = _expected_quadratic_step(params, lam=lam)
+
+    assert isinstance(info, FrozenDict)
+    assert set(info.keys()) == set(plan.metric_keys)
+    assert int(state_new.step) == 1
+    np.testing.assert_allclose(params_new, expected_params, rtol=1e-6, atol=1e-6)
+    _assert_exact_info(info, expected_info)
+    np.testing.assert_allclose(info[mx.GAIN_RATIO], 1.0, rtol=1e-6, atol=1e-6)
+
+
+def test_damped_subproblem_reduction_is_not_objective_reduction(dtype):
+    """Regression: adding 0.5*lambda*||delta||^2 breaks rho=1 on an exact quadratic."""
+    params = jnp.asarray([1.0, 2.0, 3.0], dtype)
+    lam = jnp.asarray(1.0, dtype)
+    delta = -params / (1.0 + lam)
+
+    objective_pred = -(
+            jnp.vdot(params, delta) + 0.5 * jnp.vdot(delta, delta)
+    )
+    damped_subproblem_pred = objective_pred - 0.5 * lam * jnp.vdot(delta, delta)
+    actual = 0.5 * jnp.vdot(params, params) - 0.5 * jnp.vdot(params + delta, params + delta)
+
+    np.testing.assert_allclose(actual, objective_pred, rtol=1e-6, atol=1e-6)
+    assert not np.isclose(
+        float(actual),
+        float(damped_subproblem_pred),
+        rtol=1e-6,
+        atol=1e-6,
     )
 
-    tx = optax.scale(-0.1)
-    params = {"w": jnp.asarray([1.0, 2.0, 3.0], dtype)}
-    batch = {"x": jnp.zeros((1,), dtype), "y": jnp.zeros((1,), dtype)}
-    rng = jax.random.PRNGKey(0)
+
+def test_gain_ratio_pack_uses_final_candidate_delta(dtype):
+    """Any transformed descent update has rho=1 when the objective model is exact."""
+    params = jnp.asarray([1.0, 2.0, 3.0], dtype)
+    # Deliberately not the exact damped-solve update. This stands in for a final
+    # update after momentum, clipping, learning-rate scaling, or weight decay.
+    delta = jnp.asarray([-0.2, -0.1, -0.3], dtype)
+    params_new = params + delta
+    loss_before = 0.5 * jnp.vdot(params, params)
+
+    param_plan = _make_plan(solver=DirectSolve())
+    row_plan = _make_plan(solver=DirectRowSolve())
+    row_op = _IdentityRowOp(params)
+
+    out_param = _gain_ratio_pack_param(
+        step=jnp.asarray(0, jnp.int32),
+        plan=param_plan,
+        loss_before=loss_before,
+        loss_before_fn=lambda: loss_before,
+        loss_after_fn=lambda: 0.5 * jnp.vdot(params_new, params_new),
+        grad=params,
+        delta=delta,
+        matvec_delta_fn=lambda: delta,
+    )
+    out_row = _gain_ratio_pack_row(
+        step=jnp.asarray(0, jnp.int32),
+        plan=row_plan,
+        loss_before=loss_before,
+        loss_before_fn=lambda: loss_before,
+        loss_after_fn=lambda: 0.5 * jnp.vdot(params_new, params_new),
+        row_op=row_op,
+        delta=delta,
+    )
+
+    for out in (out_param, out_row):
+        _, _, act_dec, pred_dec, rho, valid, improved = out
+        np.testing.assert_allclose(act_dec, pred_dec, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(rho, 1.0, rtol=1e-6, atol=1e-6)
+        assert bool(valid)
+        assert bool(improved)
+
+
+def test_executor_gain_ratio_pack_respects_cadence(dtype):
+    op = QuadOp()
+    solver = DirectSolve()
+    precond = NullPrecond()
+    damping = ConstantDamping(lam0=1.0)
+    plan = _make_plan(solver=solver, gain_ratio_every_k=2)
+    tx = optax.scale(-1.0)
+
+    params = jnp.asarray([1.0, 2.0, 3.0], dtype)
     state = _init_state(params, damping, tx)
 
     @jax.jit
@@ -205,22 +395,168 @@ def test_executor_rho_pack_respects_cadence(dtype):
             damping=damping,
             tx=tx,
             params=p,
-            batch=batch,
-            rng=rng,
+            batch={},
+            rng=jax.random.PRNGKey(0),
             state=st,
         )
 
-    # step 0 -> compute rho pack (finite)
     p1, s1, info0 = run(params, state)
-    assert bool(info0[mx.RHO_VALID])  # should be valid on compute steps
-    assert jnp.isfinite(info0[mx.RHO])
+    assert bool(info0[mx.GAIN_RATIO_VALID])
+    assert jnp.isfinite(info0[mx.GAIN_RATIO])
 
-    # step 1 -> cadence off -> should be NaN/False
     p2, s2, info1 = run(p1, s1)
-    assert not bool(info1[mx.RHO_VALID])
-    assert jnp.isnan(info1[mx.RHO])
+    assert not bool(info1[mx.GAIN_RATIO_VALID])
+    assert jnp.isnan(info1[mx.GAIN_RATIO])
 
-    # step 2 -> cadence on again
-    p3, s3, info2 = run(p2, s2)
-    assert bool(info2[mx.RHO_VALID])
-    assert jnp.isfinite(info2[mx.RHO])
+    _, _, info2 = run(p2, s2)
+    assert bool(info2[mx.GAIN_RATIO_VALID])
+    assert jnp.isfinite(info2[mx.GAIN_RATIO])
+
+
+def _small_random_delta(key, params):
+    leaves, treedef = jax.tree_util.tree_flatten(params)
+    keys = jax.random.split(key, len(leaves))
+    delta = jax.tree_util.tree_unflatten(
+        treedef,
+        [jax.random.normal(k, leaf.shape, leaf.dtype) for k, leaf in zip(keys, leaves)],
+    )
+    dnorm = jnp.sqrt(jnp.maximum(tree_norm2(delta), jnp.asarray(1e-12, jnp.float32)))
+    return jax.tree_util.tree_map(lambda x: (1e-2 / dnorm) * x, delta)
+
+
+def test_fgnha_objective_model_pred_dec_row_matches_param(
+        key,
+        small_shapes,
+        mlp_logits,
+        make_teacher_classification,
+        init_mlp_classification,
+        tol,
+):
+    B, D, H, C = (
+        small_shapes["B"],
+        small_shapes["D"],
+        small_shapes["H"],
+        small_shapes["C"],
+    )
+
+    k_data, k_params, k_delta = jax.random.split(key, 3)
+    _, batch = make_teacher_classification(k_data, B, D, H, C)
+    params = init_mlp_classification(k_params, D, H, C)
+
+    op = FGNHA(
+        predict_fn=mlp_logits,
+        x_key="x",
+        y_key="y",
+        reduction="mean",
+    )
+    cstate, grad = op.init(params, batch, with_grad=True)
+    row_op = op.row_op(params, cstate, batch)
+    delta = _small_random_delta(k_delta, params)
+
+    Cd = op.matvec(params, cstate, delta)
+    g_dot_d_param = tree_vdot(grad, delta)
+    d_C_d_param = tree_vdot(delta, Cd)
+    pred_param = -(g_dot_d_param + 0.5 * d_C_d_param)
+
+    z = row_op.jvp(delta)
+    alpha = jnp.asarray(1.0 / row_op.b, z.dtype)
+    g_dot_d_row = alpha * jnp.vdot(row_op.rhs, z)
+    d_C_d_row = alpha * jnp.vdot(z, z)
+    pred_row = -(g_dot_d_row + 0.5 * d_C_d_row)
+
+    np.testing.assert_allclose(g_dot_d_row, g_dot_d_param, **tol)
+    np.testing.assert_allclose(d_C_d_row, d_C_d_param, **tol)
+    np.testing.assert_allclose(pred_row, pred_param, **tol)
+
+
+def test_executor_gain_ratio_pack_row_matches_param_for_fgnha(
+        key,
+        small_shapes,
+        mlp_logits,
+        make_teacher_classification,
+        init_mlp_classification,
+        tol,
+):
+    B, D, H, C = (
+        small_shapes["B"],
+        small_shapes["D"],
+        small_shapes["H"],
+        small_shapes["C"],
+    )
+
+    k_data, k_params, k_delta = jax.random.split(key, 3)
+    _, batch = make_teacher_classification(k_data, B, D, H, C)
+    params = init_mlp_classification(k_params, D, H, C)
+
+    op = FGNHA(
+        predict_fn=mlp_logits,
+        x_key="x",
+        y_key="y",
+        reduction="mean",
+    )
+    cstate, grad = op.init(params, batch, with_grad=True)
+    row_op = op.row_op(params, cstate, batch)
+    delta = _small_random_delta(k_delta, params)
+
+    class _DummyParamSolver:
+        space = "param"
+
+    class _DummyRowSolver:
+        space = "row"
+
+    class _NullPrecond:
+        is_identity = True
+
+        def needed_metrics(self):
+            return frozenset()
+
+    telemetry = Requirements(
+        metrics=frozenset({
+            mx.LOSS_AFTER,
+            mx.PRED_DEC,
+            mx.ACT_DEC,
+            mx.GAIN_RATIO,
+            mx.GAIN_RATIO_VALID,
+            mx.STEP_IMPROVED,
+        })
+    )
+    plan_param = build_plan(
+        damping=ConstantDamping(lam0=3e-2),
+        solver=_DummyParamSolver(),
+        precond=_NullPrecond(),
+        telemetry_reqs=telemetry,
+    )
+    plan_row = build_plan(
+        damping=ConstantDamping(lam0=3e-2),
+        solver=_DummyRowSolver(),
+        precond=_NullPrecond(),
+        telemetry_reqs=telemetry,
+    )
+
+    loss_before = op.loss(params, cstate, batch)
+    params_new = optax.apply_updates(params, delta)
+
+    out_param = _gain_ratio_pack_param(
+        step=jnp.asarray(0, jnp.int32),
+        plan=plan_param,
+        loss_before=loss_before,
+        loss_before_fn=lambda: op.loss(params, cstate, batch),
+        loss_after_fn=lambda: op.loss_only(params_new, batch),
+        grad=grad,
+        delta=delta,
+        matvec_delta_fn=lambda: op.matvec(params, cstate, delta),
+    )
+    out_row = _gain_ratio_pack_row(
+        step=jnp.asarray(0, jnp.int32),
+        plan=plan_row,
+        loss_before=loss_before,
+        loss_before_fn=lambda: op.loss(params, cstate, batch),
+        loss_after_fn=lambda: op.loss_only(params_new, batch),
+        row_op=row_op,
+        delta=delta,
+    )
+
+    for row_value, param_value in zip(out_row[:5], out_param[:5]):
+        np.testing.assert_allclose(row_value, param_value, **tol)
+    assert bool(out_row[5]) == bool(out_param[5])
+    assert bool(out_row[6]) == bool(out_param[6])

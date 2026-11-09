@@ -33,6 +33,8 @@ from .types import Array, Batch, Params, PRNGKey, StepInfo, ScalarOrSchedule, Gr
 class SecondOrderState:
     """Single state tree owned by Somax.
 
+    model_state: optional non-parameter model state, such as BatchNorm running
+        statistics. It is updated once by the curvature primal each outer step.
     opt_state: post-direction tx state (Optax state or custom).
     method_state: optional extra state for method-specific algorithms (eg AdaHessian EMAs).
     """
@@ -42,13 +44,14 @@ class SecondOrderState:
     solver_state: Any
     opt_state: Any
     method_state: Any  # optional extension point (eg AdaHessian)
+    model_state: Any = ()
 
 
 class SecondOrderMethod:
-    """Runnable Somax method: init/update.
+    """Runnable Somax method: init/step.
 
-    update(...) performs one fused step:
-      init cstate -> grad/row_op -> solve direction -> tx.update -> apply -> (optional rho) -> damping.update
+    step(...) performs one fused step:
+      init cstate -> grad/row_op -> solve direction -> tx.update -> apply -> (optional gain ratio) -> damping.update
     """
 
     def __init__(
@@ -68,11 +71,18 @@ class SecondOrderMethod:
         self.plan = plan
         self.tx = tx
 
-    def init(self, params: Params) -> SecondOrderState:
+    def init(
+            self,
+            params: Params,
+            *,
+            model_state: Any = (),
+    ) -> SecondOrderState:
+        """Initialize optimizer and optional non-parameter model state."""
         m_t = jax.tree_util.tree_map(jnp.zeros_like, params) if self.plan.want.want_m else ()
 
         return SecondOrderState(
             step=jnp.asarray(0, jnp.int32),
+            model_state=model_state,
             damp_state=self.damping.init(),
             precond_state=self.precond.init(params),
             solver_state=self.solver.init(params),
@@ -118,8 +128,8 @@ def assemble(
         estimator: Optional[EstimatorSpec] = None,
         telemetry: Optional[TelemetrySpec] = None,
 
-        # post-direction application
-        tx: GradientTransformation | None = None,  # full optax chain, if None, we build from knobs below
+        # post-direction application (owned)
+        tx: GradientTransformation | None = None,  # full optax chain (expert); if None, we build from knobs below
         learning_rate: ScalarOrSchedule = 1.0,
         clip_norm: float | None = None,
         weight_decay: float | None = None,
@@ -137,7 +147,7 @@ def assemble(
     # Build plan from components
     plan = build_plan(damping=dp, solver=slv, precond=pp, telemetry_reqs=tlm_reqs)
 
-    # Build owned post-direction tx
+    # Build owned post-direction tx (identity/sign+lr/clip/wd), unless user provided a full tx.
     optax_chain = build_optax_tx(
         tx=tx,
         learning_rate=learning_rate,

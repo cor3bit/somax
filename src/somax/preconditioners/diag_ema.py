@@ -51,9 +51,10 @@ class DiagEMAPrecond(PreconditionerPolicy):
             add_lambda: bool = False,  # if True, add damping lambda to denom
             diag_fn: Optional[Callable[[Params, CurvatureOperator, CurvatureState, PRNGKey], Updates]] = None,
     ):
-        if beta1 is not None:
-            assert 0.0 <= beta1 <= 1.0
-        assert 0.0 <= beta2 <= 1.0
+        if beta1 is not None and not (0.0 <= float(jnp.asarray(beta1, jnp.float32)) < 1.0):
+            raise ValueError("beta1 must be in [0, 1) after float32 conversion.")
+        if not (0.0 <= float(jnp.asarray(beta2, jnp.float32)) < 1.0):
+            raise ValueError("beta2 must be in [0, 1) after float32 conversion.")
 
         self.eval_every_k = int(eval_every_k)
         assert self.eval_every_k >= 1
@@ -154,7 +155,7 @@ class DiagEMAPrecond(PreconditionerPolicy):
         else:
             half_alpha = 0.5 * self.alpha
             denom = jax.tree_util.tree_map(
-                lambda vv: jnp.power(jnp.clip(vv, min=0.0), half_alpha) + jnp.asarray(eps, vv.dtype),
+                lambda vv: jnp.power(jnp.maximum(vv, 0.0), half_alpha) + jnp.asarray(eps, vv.dtype),
                 v_hat,
             )
 
@@ -174,6 +175,7 @@ class DiagEMAPrecond(PreconditionerPolicy):
 
 
 def _spatial_average_leaf(leaf: jnp.ndarray) -> jnp.ndarray:
+    """Average over the last axis (rank 2/3) or last two axes (rank 4)."""
     if leaf.ndim == 1:
         return leaf
     if leaf.ndim in (2, 3):

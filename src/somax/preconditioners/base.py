@@ -8,6 +8,7 @@ from ..curvature.base import CurvatureState, CurvatureOperator
 
 @struct.dataclass
 class PrecondState:
+    # Keep pytree-stable: use () rather than None by default.
     cache: Any
 
 

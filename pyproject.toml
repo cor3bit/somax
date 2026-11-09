@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-somax"
-version = "1.0.1"
+version = "1.1.0"
 description = "Composable Second-Order Optimization for JAX and Optax."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,6 @@ dependencies = [
     "jax>=0.4.20",
     "optax>=0.1.7",
     "flax>=0.7.5",
-    "numpy>=1.23",
 ]
 keywords = [
     "jax",
@@ -29,7 +28,7 @@ keywords = [
     "machine-learning",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -43,7 +42,7 @@ Homepage = "https://github.com/cor3bit/somax"
 Repository = "https://github.com/cor3bit/somax"
 Issues = "https://github.com/cor3bit/somax/issues"
 Releases = "https://github.com/cor3bit/somax/releases"
-#Documentation = "https://github.com/cor3bit/somax/tree/main/docs"
+Documentation = "https://github.com/cor3bit/somax/tree/main/docs"
 Paper = "https://arxiv.org/abs/2603.25976"
 
 [project.optional-dependencies]
@@ -61,6 +60,8 @@ docs = [
     "mkdocs>=1.5",
     "mkdocs-material>=9",
 ]
+matfree = ["matfree"]
+lineax = ["lineax"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

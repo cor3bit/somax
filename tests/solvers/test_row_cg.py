@@ -1,214 +1,111 @@
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+from jax.flatten_util import ravel_pytree
 
-import somax.metrics as mx
-from somax.solvers.cg import CGState
+from somax import metrics as mx
+from somax.solvers.base import NullSolverState
 from somax.solvers.row_cg import RowConjugateGradient
-from somax.solvers.row_cholesky import RowCholesky
-
-from helpers import make_full_rank_J, normal_eq_solution
+from somax.solvers.row_common import bind_row_system
 
 
-def _as_vec(x):
-    x = jnp.asarray(x)
-    if x.ndim != 1:
-        raise ValueError(f"expected 1D vector, got shape {x.shape}")
-    return x
+@pytest.fixture
+def problem(make_block_pytree, make_row_operator_from_J):
+    params, pack, _ = make_block_pytree(shape_a=(8,), shape_b=(3,))
+    L = 0.25 * jax.random.normal(jax.random.PRNGKey(17), (7, 11))
+    rhs = jnp.asarray([1.0, -0.6, 0.4, 0.7, -0.2, 1.1, 0.3])
+    # Row dimension m=7 differs from batch size B=3.
+    return params, make_row_operator_from_J(L, rhs, pack, b=3), L
 
 
-def _to_flat_pytree(x):
-    flat, _ = jax.flatten_util.ravel_pytree(x)
-    return flat
+@pytest.mark.parametrize("reduction", ["mean", "sum"])
+def test_row_system_scaling_and_solution(problem, reduction):
+    _, op, L = problem
+    lam = jnp.asarray(0.3, L.dtype)
+    A, rhs, backproject, mu = bind_row_system(op, lam, reduction=reduction)
+    factor = 1 / op.b if reduction == "mean" else 1.0
+
+    np.testing.assert_allclose(mu, lam / factor, rtol=1e-6)
+    probe = jnp.linspace(-0.8, 0.7, rhs.size)
+    np.testing.assert_allclose(A(probe), L @ (L.T @ probe) + mu * probe, rtol=2e-6, atol=1e-6)
+    np.testing.assert_allclose(ravel_pytree(backproject(probe))[0], L.T @ probe, rtol=2e-6, atol=1e-6)
+
+    solver = RowConjugateGradient(maxiter=40, tol=1e-6)
+    u, info, state = solver.solve(A, rhs, state=solver.init(None))
+    direction = np.asarray(ravel_pytree(backproject(u))[0])
+    L64, rhs64 = np.asarray(L, np.float64), np.asarray(rhs, np.float64)
+    H = factor * L64.T @ L64 + float(lam) * np.eye(L.shape[1])
+    g = factor * L64.T @ rhs64
+
+    np.testing.assert_allclose(direction, np.linalg.solve(H, g), rtol=1e-4, atol=2e-6)
+    assert isinstance(state, NullSolverState)
+    assert bool(info[mx.CG_CONVERGED])
+    assert int(info[mx.CG_ITERS]) <= 40
+    assert np.isfinite(np.asarray(info[mx.CG_RESID]))
 
 
-def test_row_cg_solves_dense_spd_row_system(keys):
-    key = keys()
-    kA, krhs = jax.random.split(key)
+def test_gram_shortcut_does_not_use_jvp(problem):
+    _, op, L = problem
+    gram = L @ L.T
 
-    m = 40
-    dtype = jnp.float32
+    def unavailable(_):
+        pytest.fail("Gram matvec should bypass row JVP")
 
-    M = jax.random.normal(kA, (m, m), dtype=dtype)
-    A = M @ M.T + jnp.asarray(1e-1, dtype=dtype) * jnp.eye(m, dtype=dtype)
-    rhs = jax.random.normal(krhs, (m,), dtype=dtype)
-
-    def A_mv(u):
-        return A @ u
-
-    rcg = RowConjugateGradient(
-        backend="pcg",
-        tol=1e-6,
-        maxiter=4 * m,
-        stabilise_every=0,
-        warm_start=False,
-    )
-    st = rcg.init(rhs)
-    u_cg, info_cg, st_new = rcg.solve(A_mv, rhs, state=st, precond=None)
-
-    assert u_cg.shape == (m,)
-    assert mx.CG_ITERS in info_cg
-    assert mx.CG_RESID in info_cg
-    assert mx.CG_CONVERGED in info_cg
-    assert st_new is not None
-    assert jnp.all(jnp.isfinite(u_cg))
-
-    resid = jnp.linalg.norm(A @ u_cg - rhs)
-    rhs_norm = jnp.maximum(jnp.linalg.norm(rhs), jnp.asarray(1e-12, dtype))
-    rel_resid = resid / rhs_norm
-    assert rel_resid < 1e-4
+    gram_op = op.replace(jvp=unavailable, gram_mv=lambda u: gram @ u)
+    A, rhs, backproject, _ = bind_row_system(gram_op, jnp.asarray(0.3))
+    solver = RowConjugateGradient(maxiter=40, tol=1e-6)
+    u, _, _ = solver.solve(A, rhs, state=solver.init(None))
+    expected = np.linalg.solve(np.asarray(gram, np.float64) + 0.3 * op.b * np.eye(rhs.size),
+                               np.asarray(rhs, np.float64))
+    np.testing.assert_allclose(u, expected, rtol=1e-4, atol=2e-6)
+    np.testing.assert_allclose(ravel_pytree(backproject(u))[0], L.T @ u, rtol=1e-5)
 
 
-def test_row_cg_rejects_precond(keys, make_block_pytree, bind_row_system_from_J):
-    key = keys()
-    m, n = 16, 8
-
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-    rhs_row = jax.random.normal(keys(), (m,), dtype=jnp.float32)
-
-    lam = jnp.asarray(1e-3, dtype=jnp.float32)
-    bsz = 8
-
-    A_mv, rhs, _backproject, _mu = bind_row_system_from_J(J, rhs_row, pack, lam=lam, b=bsz, reduction="mean")
-
-    rcg = RowConjugateGradient(backend="pcg", tol=1e-6, maxiter=50, stabilise_every=10, warm_start=True)
-
-    st = rcg.init(rhs)
-    with pytest.raises(NotImplementedError):
-        rcg.solve(A_mv, rhs, state=st, precond=lambda x: x)
+def test_stabilized_row_cg(problem):
+    _, op, _ = problem
+    A, rhs, _, _ = bind_row_system(op, jnp.asarray(0.3))
+    solver = RowConjugateGradient(maxiter=40, tol=1e-5, stabilise_every=2)
+    u, info, _ = solver.solve(A, rhs, state=solver.init(None))
+    true_relative_residual = jnp.linalg.norm(A(u) - rhs) / jnp.linalg.norm(rhs)
+    assert np.isfinite(np.asarray(u)).all()
+    assert true_relative_residual < 1e-4
+    assert int(info[mx.CG_ITERS]) <= 40
 
 
-def test_row_cg_warm_start_accepts_non_cg_state(keys, make_block_pytree, bind_row_system_from_J):
-    key = keys()
-    m, n = 24, 12
+def test_stateless_under_jit(problem):
+    _, op, _ = problem
+    solver = RowConjugateGradient(maxiter=10, tol=1e-5)
+    A, rhs, _, _ = bind_row_system(op, jnp.asarray(0.3))
 
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-    rhs_row = jax.random.normal(keys(), (m,), dtype=jnp.float32)
+    @jax.jit
+    def run(b, state):
+        u, info, next_state = solver.solve(A, b, state=state)
+        return u, info[mx.CG_RESID], next_state
 
-    lam = jnp.asarray(1e-4, dtype=jnp.float32)
-    bsz = 8
-
-    A_mv, rhs, _backproject, _mu = bind_row_system_from_J(J, rhs_row, pack, lam=lam, b=bsz, reduction="mean")
-
-    rcg = RowConjugateGradient(backend="pcg", tol=1e-6, maxiter=200, stabilise_every=10, warm_start=True)
-
-    # Pass a dummy state. RowCG should fall back to x0=zeros_like(rhs) internally.
-    bogus_state = object()
-    u, info, _ = rcg.solve(A_mv, rhs, state=bogus_state, precond=None)
-
-    u = _as_vec(u)
-    assert u.shape == (m,)
-    assert mx.CG_ITERS in info
-    assert mx.CG_RESID in info
-    assert jnp.isfinite(info[mx.CG_RESID])
+    u1, resid1, state1 = run(rhs, solver.init(None))
+    u2, resid2, state2 = run(0.8 * rhs, state1)
+    assert isinstance(state2, NullSolverState)
+    assert not jax.tree_util.tree_leaves(state2)
+    assert u1.shape == u2.shape == rhs.shape
+    assert np.isfinite(np.asarray([resid1, resid2])).all()
 
 
-def test_row_cg_warm_start_resets_on_shape_mismatch(keys, make_block_pytree, bind_row_system_from_J):
-    key = keys()
-    m, n = 32, 16
-
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-    rhs_row = jax.random.normal(keys(), (m,), dtype=jnp.float32)
-
-    lam = jnp.asarray(1e-4, dtype=jnp.float32)
-    bsz = 8
-
-    A_mv, rhs, _bp, _mu = bind_row_system_from_J(J, rhs_row, pack, lam=lam, b=bsz, reduction="mean")
-
-    rcg = RowConjugateGradient(backend="pcg", tol=1e-6, maxiter=100, stabilise_every=10, warm_start=True)
-
-    # State has wrong shape; should be reset to zeros_like(rhs).
-    st_bad = CGState(last_x=jnp.zeros((m + 3,), dtype=jnp.float32))
-    u, info, st_new = rcg.solve(A_mv, rhs, state=st_bad, precond=None)
-
-    u = _as_vec(u)
-    assert u.shape == (m,)
-    assert isinstance(st_new, CGState)
-    assert st_new.last_x.shape == (m,)
-    assert mx.CG_ITERS in info
-    assert jnp.isfinite(info[mx.CG_RESID])
+@pytest.mark.parametrize("option, error", [
+    ({"warm_start": True}, NotImplementedError),
+    ({"preconditioned": True}, NotImplementedError),
+    ({"solve_dtype": jnp.float32}, ValueError),
+])
+def test_rejects_unsupported_options(option, error):
+    with pytest.raises(error):
+        RowConjugateGradient(**option)
 
 
-def test_row_cg_warm_start_casts_dtype(keys, make_block_pytree, bind_row_system_from_J):
-    key = keys()
-    m, n = 20, 10
-
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-    rhs_row = jax.random.normal(keys(), (m,), dtype=jnp.float32)
-
-    lam = jnp.asarray(1e-4, dtype=jnp.float32)
-    bsz = 8
-
-    A_mv, rhs, _bp, _mu = bind_row_system_from_J(J, rhs_row, pack, lam=lam, b=bsz, reduction="mean")
-
-    rcg = RowConjugateGradient(backend="pcg", tol=1e-6, maxiter=120, stabilise_every=10, warm_start=True)
-
-    # State last_x is float64; should be cast to rhs dtype.
-    st_bad = CGState(last_x=jnp.zeros((m,), dtype=jnp.float64))
-    _u, _info, st_new = rcg.solve(A_mv, rhs, state=st_bad, precond=None)
-
-    assert isinstance(st_new, CGState)
-    assert st_new.last_x.dtype == jnp.float32
-
-
-def test_row_cg_warm_start_does_not_blow_up_iters(keys, make_block_pytree, bind_row_system_from_J):
-    key = keys()
-    m, n = 96, 40
-
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-
-    rhs_row1 = jax.random.normal(keys(), (m,), dtype=jnp.float32)
-    rhs_row2 = rhs_row1 + 1e-2 * jax.random.normal(keys(), (m,), dtype=jnp.float32)
-
-    lam = jnp.asarray(1e-4, dtype=jnp.float32)
-    bsz = 8
-
-    A_mv1, rhs1, _bp1, _mu1 = bind_row_system_from_J(J, rhs_row1, pack, lam=lam, b=bsz, reduction="mean")
-    A_mv2, rhs2, _bp2, _mu2 = bind_row_system_from_J(J, rhs_row2, pack, lam=lam, b=bsz, reduction="mean")
-
-    rcg = RowConjugateGradient(backend="pcg", tol=1e-6, maxiter=2000, stabilise_every=10, warm_start=True)
-
-    st = rcg.init(rhs1)
-    _, info1, st = rcg.solve(A_mv1, rhs1, state=st, precond=None)
-    _, info2, _ = rcg.solve(A_mv2, rhs2, state=st, precond=None)
-
-    it1 = int(info1[mx.CG_ITERS])
-    it2 = int(info2[mx.CG_ITERS])
-
-    # Warm-start should not catastrophically increase iterations.
-    # (Not requiring strict improvement to avoid flakiness.)
-    assert it2 <= max(it1 + 5, int(1.5 * it1) + 1)
-
-
-def test_row_cg_warm_start_false_ignores_state(keys, make_block_pytree, bind_row_system_from_J):
-    key = keys()
-    m, n = 24, 12
-
-    _template, pack, _zeros_like = make_block_pytree(shape_a=(n,), shape_b=(0,))
-    J = make_full_rank_J(m, n, key, dtype=jnp.float32)
-    rhs_row = jax.random.normal(keys(), (m,), dtype=jnp.float32)
-
-    lam = jnp.asarray(1e-4, dtype=jnp.float32)
-    bsz = 8
-
-    A_mv, rhs, _bp, _mu = bind_row_system_from_J(J, rhs_row, pack, lam=lam, b=bsz, reduction="mean")
-
-    rcg = RowConjugateGradient(backend="pcg", tol=1e-6, maxiter=200, stabilise_every=10, warm_start=False)
-
-    # When warm_start=False, RowCG delegates and should accept a Null-like state.
-    bogus_state = object()
-    u, info, st_new = rcg.solve(A_mv, rhs, state=bogus_state, precond=None)
-
-    u = _as_vec(u)
-    assert u.shape == (m,)
-    assert mx.CG_ITERS in info
-    assert mx.CG_RESID in info
-    assert jnp.isfinite(info[mx.CG_RESID])
-    # State type is solver-dependent; just ensure we got something back.
-    assert st_new is not None
+def test_rejects_invalid_rhs_and_preconditioner(problem):
+    _, op, _ = problem
+    solver = RowConjugateGradient()
+    A, rhs, _, _ = bind_row_system(op, jnp.asarray(0.3))
+    with pytest.raises(ValueError, match="shape"):
+        solver.solve(A, rhs[:, None], state=solver.init(None))
+    with pytest.raises(NotImplementedError, match="preconditioning"):
+        solver.solve(A, rhs, state=solver.init(None), precond=lambda x: x)

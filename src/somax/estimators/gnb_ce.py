@@ -8,9 +8,14 @@ from ..curvature.base import CurvatureState
 
 
 class GaussNewtonBartlett(EstimatorPolicy):
-    """Diagonal of GGN-CE via Bartlett-corrected empirical Fisher: B * E[(grad_theta l_i)^2]."""
+    """Estimate the GGN-CE diagonal as B * E[g_sample**2].
+
+    g_sample is the batch-mean gradient with labels sampled from the model.
+    """
 
     def __init__(self, n_samples: int = 1):
+        if int(n_samples) < 1:
+            raise ValueError("n_samples must be positive.")
         self.n_samples = int(n_samples)
 
     def diagonal(
@@ -31,27 +36,23 @@ class GaussNewtonBartlett(EstimatorPolicy):
         S = self.n_samples
         keys = jax.random.split(rng, S)
 
-        # init accumulator (sum of g_samp^2 over samples)
         acc0 = jax.tree_util.tree_map(jnp.zeros_like, params)
 
         def body(acc, key):
-            # Sample labels for this Monte Carlo draw
             y = jax.random.categorical(key, logits=logits, axis=-1)  # (B,)
 
-            # Residual for sampled labels
             r = probs - jax.nn.one_hot(y, C, dtype=logits.dtype)  # (B, C)
 
-            # VJP: mean gradient sample
+            # Mean gradient for one sampled batch.
             (g_samp,) = JT(alpha * r)
 
-            # Accumulate squared gradients
             contrib = jax.tree_util.tree_map(lambda gi: gi * gi, g_samp)
             acc = jax.tree_util.tree_map(lambda a, c: a + c, acc, contrib)
             return acc, None
 
         accN, _ = jax.lax.scan(body, acc0, keys)
 
-        # Monte Carlo average then Bartlett factor
+        # Bartlett scaling for the batch-mean gradient.
         mean_G2 = jax.tree_util.tree_map(lambda a: a / S, accN)
         return jax.tree_util.tree_map(lambda a: B_scalar * a, mean_G2)
 
